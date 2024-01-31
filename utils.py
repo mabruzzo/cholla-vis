@@ -279,3 +279,23 @@ write_concat_slice.__doc__ = """
     dnameout: string
         directory name of output files, should include '/' at end or leave blank for current directory
     """
+
+
+def load_2D_h5(path):
+    hdr_out = {}
+    with h5py.File(path, 'r') as filein:
+        # read in the header data from the input file
+        head = filein.attrs
+
+        _copy_header_attrs(
+            hdr_dest = hdr_out, hdr_src = head,
+            attr_l = ['n_step', 'dims', 'gamma', 't', 'dt',
+                      'velocity_unit', 'length_unit', 'mass_unit', 
+                      'density_unit', 'dx', 'domain', 'bounds']
+        )
+
+        data = {}
+        for field in filein.keys():
+            #print(field)
+            data[field] = filein[field][...]
+    return hdr_out, data

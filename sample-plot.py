@@ -10,10 +10,10 @@ import os.path
 
 from IPython.lib.pretty import pretty
 
-from utils import concat_particles, concat_slice, write_concat_particles, write_concat_slice
-
-print('SCHED AFFINITY:', len(os.sched_getaffinity(0)))
-print('CPU_COUNT:', multiprocessing.cpu_count())
+from utils import (
+    concat_particles, concat_slice, write_concat_particles, write_concat_slice,
+    load_2D_h5
+)
 
 class ChollaUnits:
     def __init__(self):
@@ -53,7 +53,7 @@ def _getNdens(dset, suffix, unit_obj):
 _slice_presets = {
     'temperature' : (_getTemp, 'temperature',
                      dict(
-                        imshow_kwargs = {'cmap' : 'viridis',# 'tab20c',
+                        imshow_kwargs = {'cmap' : 'magma',# 'tab20c',
                                          'vmin' : 3.5, 'vmax' : 9,
                                          'alpha' : 0.95},
                         cbar_label = r"$\log_{10} T$ [K]")
@@ -76,6 +76,7 @@ _slice_presets = {
 }
 
 def _getColDensity_proj(proj_dset, suffix, unit_obj):
+    u = unit_obj
     return proj_dset[f'd_{suffix}'][:] * u.LENGTH_UNIT * u.DENSITY_UNIT/(u.mu*u.MP)
 
 def _getAvgTemperature_proj(proj_dset, suffix, unit_obj):
@@ -85,12 +86,15 @@ def _getAvgTemperature_proj(proj_dset, suffix, unit_obj):
 
 _proj_presets = {
     'column_density' : (_getColDensity_proj, 'column_density',
-                        dict(imshow_kwargs = {'cmap' : 'viridis'},
+                        dict(imshow_kwargs = {'cmap' : 'viridis',
+                                              'vmin' : 20.0, 'vmax' : 24.25,
+                                             },
                              cbar_label = r"$\log_{10} N\ [{\rm cm}^{-2}]$")
                         ),
-    'avg_temperature' : (_getColDensity_proj, 'avg_temperature',
-                        dict(imshow_kwargs = {'cmap' : 'inferno',
-                                              'vmin' : 3.5, 'vmax' : 9},
+    'avg_temperature' : (_getAvgTemperature_proj, 'avg_temperature',
+                        dict(imshow_kwargs = {'cmap' : 'magma',
+                                              'vmin' : 3.5, 'vmax' : 7
+                                             },
                              cbar_label = r"$\log_{10} \langle T \rangle_{\rm mass-weighted} [{\rm K}]$")
                         ),
 }
@@ -174,7 +178,7 @@ def doLogSlicePlot2(data, slc_particle_selection, title, extent,
     else:
         raise RuntimeError(f"unknown orientation: {orientation}")
 
-    fig,ax = plt.subplots(1,1, figsize=(12, 12))
+    fig,ax = plt.subplots(1,1, figsize=(12, 10))
     ax.set_xlabel(x_ax_label)
     ax.set_ylabel(y_ax_label)
 
@@ -271,23 +275,39 @@ def itr_orientation_preset(orientation, preset_name):
 
 def make_slice_plot(dnamein, n, preset_name, orientation,
                     callback = None, plot_proj = False,
+                    load_distributed_files = False,
                     skip_particles = True):
  
     p_props = None
     if plot_proj:
         kind = "proj"
-        raise RuntimeError("Not implemented yet!")
+        if load_distributed_files:
+            raise RuntimeError()
+        else:
+            path = f'{dnamein}/{n}_proj.h5'
+            print(path)
+            hdr, dset = load_2D_h5(path)
     else:
-        hdr, slc_dset = concat_slice(n, dnamein)
+        kind = "slice"
+        if load_distributed_files:
+            hdr, dset = concat_slice(n, dnamein)
+        else:
+            path = f'{dnamein}/{n}_slice.h5'
+            hdr, dset = load_2D_h5(path)
         if not skip_particles:
-            _, p_props = concat_particles(n, dnamein)
+            if not load_distributed_files:
+                _, p_props = concat_particles(n, dnamein)
+            else:
+                raise RuntimeError()
+                
 
     u_obj = ChollaUnits()
 
     out_l = []
     for orient, pn in itr_orientation_preset(orientation, preset_name):
-        fig = _make_2d_plot(hdr, slc_dset, p_props, u_obj = ChollaUnits(),
-                            preset_name = pn, orientation = orient)
+        fig = _make_2d_plot(hdr, dset, p_props, u_obj = ChollaUnits(),
+                            preset_name = pn, orientation = orient,
+                            kind = kind)
 
         if callback is None:
             out_l.append(fig)
@@ -305,22 +325,30 @@ import sys
 from traceback import format_exc, format_tb
 
 
-def _saver(fig, n, orientation, preset_name, kind, try_makedirs = True):
-    outdir = f'./images/{kind}/{orientation}/{preset_name}/'
+def _saver(fig, n, orientation, preset_name, outdir_prefix,
+           try_makedirs = True):
+    outdir = f'{outdir_prefix}/{orientation}/{preset_name}/'
     #print(outdir)
     if try_makedirs:
         os.makedirs(outdir, exist_ok = True)
     if (fig is not None) and (n is not None):
+        fig.tight_layout()
         plt.savefig(f'{outdir}/{n:04d}.png', dpi = 300)
         plt.close(fig)
     return None
 
-def make_plot(n, kind, preset_name, run_dir, orientation = 'xz', try_makedirs = False):
-    callback = partial(_saver, n = n, kind = kind, try_makedirs = try_makedirs)
+def make_plot(n, preset_name, run_dir, *, outdir_prefix,
+              orientation = 'xz', try_makedirs = False, plot_proj = False,
+              load_distributed_files = False):
+    callback = partial(_saver, n = n, try_makedirs = try_makedirs,
+                       outdir_prefix = outdir_prefix)
+
+    print(f"Processing SNAP: {n}")
 
     make_slice_plot(run_dir, n, preset_name = preset_name,
                     orientation = orientation,
-                    callback = callback)
+                    callback = callback, plot_proj = plot_proj,
+                    load_distributed_files = load_distributed_files)
     return n
 
 class _FuncWrapper:
@@ -338,19 +366,22 @@ class _FuncWrapper:
 
             tmp = format_exc().replace('\n','\n'+indent) + '\n' + ('\n'+indent).join(format_tb(exc_traceback))
             print(
-                f"error encountered during call with args = {args!r}, kwargs = {kwargs!r}. "
-                f"The Error is:\n{indent}{tmp}\n",
+                f"error encountered during call with args = {args!r}, kwargs = "
+                f"{kwargs!r}. The Error is:\n{indent}{tmp}\n",
                 flush = True)
 
-def make_plots(n_itr, kind, preset_name, *, run_dir, orientation = 'xz', pool = None):
+def make_plots(n_itr, preset_name, *, run_dir, plot_proj, outdir_prefix,
+               orientation = 'xz', load_distributed_files = False, pool = None):
     # try to make the output directories ahead of time:
     for orient, pn in itr_orientation_preset(orientation, preset_name):
         _saver(fig = None, n = None, orientation = orient, preset_name = pn,
-               kind = kind, try_makedirs = True)
+               outdir_prefix = outdir_prefix, try_makedirs = True)
 
-    func = _FuncWrapper(make_plot, kind = kind, preset_name = preset_name,
+    func = _FuncWrapper(make_plot, preset_name = preset_name,
                         orientation = orientation, try_makedirs = False,
-                        run_dir = run_dir)
+                        run_dir = run_dir, plot_proj = plot_proj,
+                        outdir_prefix = outdir_prefix,
+                        load_distributed_files = load_distributed_files)
 
     if pool is None:
         my_map = map
@@ -362,23 +393,108 @@ def make_plots(n_itr, kind, preset_name, *, run_dir, orientation = 'xz', pool = 
         count +=1
         print('done: ', rslt)
 
+def main(args):
+
+    #run_dir = ('/lustre/orion/ast181/scratch/mwabruzzo/disk-runs/'
+    #           'first-attempt/2048/')
+    #run_dir = ('../sample-data/2048/')
+
+    load_distributed_files = False
+
+    if args.kind == "proj":
+        plot_proj, orientation = True, ['xy', 'xz']
+        default_presets = ['column_density', 'avg_temperature']
+    else:
+        plot_proj, orientation = False, ['yz', 'xy', 'xz']
+        default_presets = ['temperature', "ndens", 'phat']
+
+    if args.save_dir is None:
+        outdir_prefix = './images/'
+    else:
+        assert len(args.save_dir) > 0
+        outdir_prefix = args.save_dir + '/'
+
+    run_dir = args.load_dir
+
+    snap_list = args.snaps
+
+    if args.quan is None:
+        preset_name = default_presets
+    else:
+        preset_name = args.quan
+
+    def do_work(pool):
+        try:
+            make_plots(
+                snap_list, run_dir = run_dir,
+                preset_name = preset_name, orientation = orientation,
+                plot_proj = plot_proj, pool = pool,
+                outdir_prefix = outdir_prefix,
+                load_distributed_files = load_distributed_files
+            )
+        except Exception as e:
+            err_message = f'encountered problem'
+
+            print(err_message)
+            raise
+
+    if args.ncores == 1:
+        do_work(None)
+    elif args.ncores > 1:
+        with multiprocessing.Pool(processes=args.ncores) as pool:
+            do_work(pool)
+    else:
+        raise RuntimeError('the --ncores arg must be a positive int')
+# command line parsing
+import argparse
+import re
+
+def integer_sequence(s):
+    print(s)
+    m = re.match(
+        r"(?P<start>[-+]?\d+):(?P<stop>[-+]?\d+)(:(?P<step>[-+]?\d+))?",
+        s)
+    if m is not None:
+        rslts = m.groupdict()
+        step = int(rslts.get('step',1))
+        if step == 0:
+            raise ValueError(f"The range, {s!r}, has a stepsize of 0")
+        seq = range(int(rslts['start']), int(rslts['stop']), step)
+        if len(seq) == 0:
+            raise ValueError(f"The range, {s!r}, has 0 values")
+        return seq
+    elif re.match(r"([-+]?\d+)(,[ ]*[-+]?\d+)+", s):
+        seq = [int(elem) for elem in s.split(',')]
+        return seq
+    try:
+        return [int(s)]
+    except ValueError:
+        raise ValueError(
+            f"{s!r} is invalid. It should be a single int or a range"
+        ) from None
+
+parser = argparse.ArgumentParser(
+    description = "Makes simple slice and projection plots from Cholla outputs"
+)
+parser.add_argument(
+    '--snaps', type = integer_sequence, required=True,
+    help = 'Which indices to plot. Can be a single number (e.g. 8) or '
+           'a range specified with slice syntax (e.g. 2:9 or 5:3). ')
+parser.add_argument(
+    '--load-dir', type = str, default = './',
+    help = 'Specifies directory to load data from')
+parser.add_argument(
+    '--save-dir', type = str, default = None,
+    help = 'Specifies directory to save data in')
+parser.add_argument(
+    '-k', '--kind', choices=['slice', 'proj'], required=True,
+    help = 'What kind of 2D dataset to plot')
+parser.add_argument(
+    '--quan', type = str, nargs = '+',
+    help = 'The quantity to plot')
+parser.add_argument(
+    '--ncores', type = int, default = 1,
+    help = 'Number of processes (using multiprocessing)')
 
 if __name__ == '__main__':
-    sim_names = ('2048',)
-    with multiprocessing.Pool(processes=8) as pool:
-        for sim_name in sim_names:
-            print(f'\n\n\n sim: {sim_name}')
-
-            try:
-                make_plots(range(5,76,10),
-                           sim_name,
-                           run_dir = '/lustre/orion/ast181/scratch/mwabruzzo/disk-runs/first-attempt/2048/',
-                           preset_name = ['temperature', "ndens", 'phat'],
-                           orientation = ['yz', 'xy', 'xz'],
-                           pool = pool)
-            except Exception as e:
-                err_message = f'encountered problem in {sim_name} - skipping'
-
-                print(err_message)
-                raise
-                #continue
+    main(parser.parse_args())
