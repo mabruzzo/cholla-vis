@@ -8,7 +8,7 @@ import multiprocessing
 import os
 import os.path
 
-from IPython.lib.pretty import pretty
+#from IPython.lib.pretty import pretty
 
 from utils import (
     concat_particles, concat_slice, write_concat_particles, write_concat_slice,
