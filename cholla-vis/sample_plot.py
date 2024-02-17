@@ -11,8 +11,7 @@ import os.path
 #from IPython.lib.pretty import pretty
 
 from utils import (
-    concat_particles, concat_slice, write_concat_particles, write_concat_slice,
-    load_2D_h5
+    concat_particles, concat_slice, concat_proj, load_2D_h5
 )
 
 class ChollaUnits:
@@ -53,7 +52,7 @@ def _getNdens(dset, suffix, unit_obj):
 _slice_presets = {
     'temperature' : (_getTemp, 'temperature',
                      dict(
-                        imshow_kwargs = {'cmap' : 'magma',# 'tab20c',
+                        imshow_kwargs = {'cmap' : 'plasma',# 'tab20c',
                                          'vmin' : 3.5, 'vmax' : 9,
                                          'alpha' : 0.95},
                         cbar_label = r"$\log_{10} T$ [K]")
@@ -67,9 +66,9 @@ _slice_presets = {
                     ),
     'ndens'       : (_getNdens, 'number density',
                      dict(
-                        imshow_kwargs = {'cmap' : 'viridis',
+                        imshow_kwargs = {'cmap' : 'plasma',
                                          # this is a complete guess
-                                         'vmin' : -5, 'vmax' : 5,
+                                         'vmin' : -3, 'vmax' : 3,
                                          'alpha' : 0.95},
                         cbar_label = r"$\log_{10} n\ [{\rm cm}^{-3}]$")
                     )
@@ -92,7 +91,7 @@ _proj_presets = {
                              cbar_label = r"$\log_{10} N\ [{\rm cm}^{-2}]$")
                         ),
     'avg_temperature' : (_getAvgTemperature_proj, 'avg_temperature',
-                        dict(imshow_kwargs = {'cmap' : 'magma',
+                        dict(imshow_kwargs = {'cmap' : 'plasma',#'magma',
                                               'vmin' : 3.5, 'vmax' : 7
                                              },
                              cbar_label = r"$\log_{10} \langle T \rangle_{\rm mass-weighted} [{\rm K}]$")
@@ -126,17 +125,20 @@ def _particle_pos_xyz(dset, idx = None):
         return dset['x'][idx], dset['y'][idx], dset['z'][idx]
     return dset['pos_x'][idx], dset['pos_y'][idx], dset['pos_z'][idx]
 
-class SliceParticleSelection:
 
-    def __init__(self, p_props, orientation, max_age = None, max_sliceax_abspos = None):
-        # identify existing particles
-        if max_age is None:
-            p_idx = slice(None)
-            selection_count = 'all'
-        else:
-            p_idx = p_props['age'] < max_age
+class ParticleSelector:
+
+    def __init__(self, age_based = True):
+        self.age_based = age_based
+
+    def __call__(self, p_props, orientation, snap_time = None, max_sliceax_abspos = None):
+        if self.age_based and (snap_time is not None):
+            p_idx = p_props['age'] < snap_time
             selection_count = str(p_idx.sum())
-        print(f"selecting {selection_count} particles out of {max_age.size} based on age")
+            print(f"selecting {selection_count} particles out of {p_props['age'].size} based on age")
+        else:
+            p_idx = slice(None)
+            print(f"selecting all {p_props['age'].size} particles")
 
         # determine sizes of particles that we will plot
         norm_mass = p_props['mass'][p_idx]/np.sum(p_props['mass'][p_idx])
@@ -153,9 +155,15 @@ class SliceParticleSelection:
             assert max_sliceax_abspos > 0
             mask = np.abs(pos_arrays[slcax]) < max_sliceax_abspos
 
-        self.particle_imx = pos_arrays[imx][mask]
-        self.particle_imy = pos_arrays[imy][mask]
-        self.sizes = sizes[mask]
+        return SliceParticleSelection(pos_arrays[imx][mask], pos_arrays[imy][mask],
+                                      sizes[mask])
+
+class SliceParticleSelection:
+
+    def __init__(self, particle_imx, particle_imy, sizes):
+        self.particle_imx = particle_imx
+        self.particle_imy = particle_imy
+        self.sizes = sizes
 
 
 
@@ -215,7 +223,8 @@ def _rounded_float_to_str(v, decimals = 0):
 def _make_2d_plot(hdr, slc_dset, p_props, u_obj,
                   kind = "slice",
                   preset_name = "temperature",
-                  orientation = 'xz'):
+                  orientation = 'xz',
+                  particle_selector = None):
 
     assert kind in ["slice", "proj"]
     cur_t = hdr['t'][0]
@@ -242,10 +251,11 @@ def _make_2d_plot(hdr, slc_dset, p_props, u_obj,
     if (p_props is None) or (kind != "slice"):
         slc_particle_selection = None
     else:
+        assert particle_selector is not None
         max_sliceax_abspos = None if orientation == 'xy' else 0.4
-        slc_particle_selection = SliceParticleSelection(
+        slc_particle_selection = particle_selector(
             p_props = p_props, orientation = orientation,
-            max_age = cur_t,
+            snap_time = cur_t,
             max_sliceax_abspos = max_sliceax_abspos)
 
     extent = (left_edge[im_x_ind], left_edge[im_x_ind] + domain_dims[im_x_ind],
@@ -276,16 +286,15 @@ def itr_orientation_preset(orientation, preset_name):
 def make_slice_plot(dnamein, n, preset_name, orientation,
                     callback = None, plot_proj = False,
                     load_distributed_files = False,
-                    skip_particles = True):
+                    particle_selector = None):
  
     p_props = None
     if plot_proj:
         kind = "proj"
         if load_distributed_files:
-            raise RuntimeError()
+            hdr, dset = concat_proj(n,dnamein)
         else:
             path = f'{dnamein}/{n}_proj.h5'
-            print(path)
             hdr, dset = load_2D_h5(path)
     else:
         kind = "slice"
@@ -294,11 +303,11 @@ def make_slice_plot(dnamein, n, preset_name, orientation,
         else:
             path = f'{dnamein}/{n}_slice.h5'
             hdr, dset = load_2D_h5(path)
-        if not skip_particles:
-            if not load_distributed_files:
-                _, p_props = concat_particles(n, dnamein)
-            else:
-                raise RuntimeError()
+    if particle_selector is not None:
+        if load_distributed_files:
+            _, p_props = concat_particles(n, dnamein)
+        else:
+            raise RuntimeError()
                 
 
     u_obj = ChollaUnits()
@@ -307,6 +316,7 @@ def make_slice_plot(dnamein, n, preset_name, orientation,
     for orient, pn in itr_orientation_preset(orientation, preset_name):
         fig = _make_2d_plot(hdr, dset, p_props, u_obj = ChollaUnits(),
                             preset_name = pn, orientation = orient,
+                            particle_selector = particle_selector,
                             kind = kind)
 
         if callback is None:
@@ -339,15 +349,17 @@ def _saver(fig, n, orientation, preset_name, outdir_prefix,
 
 def make_plot(n, preset_name, run_dir, *, outdir_prefix,
               orientation = 'xz', try_makedirs = False, plot_proj = False,
+              particle_selector = None,
               load_distributed_files = False):
     callback = partial(_saver, n = n, try_makedirs = try_makedirs,
                        outdir_prefix = outdir_prefix)
 
-    print(f"Processing SNAP: {n}")
+    #print(f"Processing SNAP: {n}")
 
     make_slice_plot(run_dir, n, preset_name = preset_name,
                     orientation = orientation,
                     callback = callback, plot_proj = plot_proj,
+                    particle_selector = particle_selector,
                     load_distributed_files = load_distributed_files)
     return n
 
@@ -371,7 +383,8 @@ class _FuncWrapper:
                 flush = True)
 
 def make_plots(n_itr, preset_name, *, run_dir, plot_proj, outdir_prefix,
-               orientation = 'xz', load_distributed_files = False, pool = None):
+               orientation = 'xz', load_distributed_files = False, 
+               particle_selector = None, pool = None):
     # try to make the output directories ahead of time:
     for orient, pn in itr_orientation_preset(orientation, preset_name):
         _saver(fig = None, n = None, orientation = orient, preset_name = pn,
@@ -381,7 +394,8 @@ def make_plots(n_itr, preset_name, *, run_dir, plot_proj, outdir_prefix,
                         orientation = orientation, try_makedirs = False,
                         run_dir = run_dir, plot_proj = plot_proj,
                         outdir_prefix = outdir_prefix,
-                        load_distributed_files = load_distributed_files)
+                        load_distributed_files = load_distributed_files,
+                        particle_selector = particle_selector)
 
     if pool is None:
         my_map = map

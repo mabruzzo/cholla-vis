@@ -3,6 +3,7 @@ import os.path
 
 import h5py
 import numpy as np
+from typing import Tuple
 
 def _path_iter(prefix):
     # we can probably improve this by looking at the nprocs attribute of the hdf5 file
@@ -69,6 +70,9 @@ def concat_particles(n, dnamein, preserve_density_arr = False):
     particle_props = {}
     n_total_particles = 0
 
+    # bound is used to track the left boundary (start with large vals)
+    bounds = np.array([np.inf, np.inf, np.inf])
+
     # loop over files for a given output time
     for i, path in enumerate(_path_iter(f"{dnamein}{n}_particles.h5")):
 
@@ -89,11 +93,14 @@ def concat_particles(n, dnamein, preserve_density_arr = False):
                     hdr_dest = hdr_out, hdr_src = head,
                     attr_l = ['n_step', 'dims', 'gamma', 't', 'dt',
                               'velocity_unit', 'length_unit', 'mass_unit', 
-                              'density_unit']
+                              'density_unit', 'domain']
                 )
 
                 if preserve_density_arr:
                     density = np.zeros((nx, ny, nz))
+
+            # make sure to do this next operation from each file
+            bounds = np.minimum(bounds, filein.attrs['bounds'][:])
 
             # write data from individual processor file to
             # correct location in concatenated file
@@ -134,6 +141,7 @@ def concat_particles(n, dnamein, preserve_density_arr = False):
     assert len(dset) > 0
 
     hdr_out['n_total_particles'] = n_total_particles
+    hdr_out['bounds'] = bounds
 
     return hdr_out, dset
     
@@ -168,12 +176,11 @@ def _get_field_list_slice(keys):
             key_set.add(field_type)
     return list(key_set)
 
-def concat_slice(n,dnamein):
+def concat_2D(n,dnamein, kind):
     """
-    Inherited from Alwin
+    Adapted from code inherited from Alwin
 
-    Reads files of form dnamein{n}_slice.h5.{rank}, looping over rank, outputting to file 
-    dnameout{n}_slice.h5.
+    Reads files of form dnamein{n}_{kind}.h5.{rank}, looping over rank
 
     Parameters
     ----------
@@ -181,6 +188,8 @@ def concat_slice(n,dnamein):
         output number of file
     dnamein: string
         directory name of input files, should include '/' at end or leave blank for current directory
+    kind : {"slice", "proj"}
+        specifies the kind of data to be concatenated
 
     Returns
     -------
@@ -204,7 +213,7 @@ def concat_slice(n,dnamein):
     field_list = [] # filled up during first loop
 
     # loop over files for a given output time
-    for i, path in enumerate(_path_iter(f"{dnamein}{n}_slice.h5")):
+    for i, path in enumerate(_path_iter(f"{dnamein}{n}_{kind}.h5")):
 
         if not os.path.isfile(path):
             raise RuntimeError(f"no file found called {path}")
@@ -228,9 +237,15 @@ def concat_slice(n,dnamein):
 
                 field_list += _get_field_list_slice(filein.keys())
 
-                xy_map = dict((f, np.zeros((nx,ny))) for f in field_list)
-                xz_map = dict((f, np.zeros((nx,nz))) for f in field_list)
-                yz_map = dict((f, np.zeros((ny,nz))) for f in field_list)
+                xy_map, xz_map, yz_map = None, None, None
+                if any(f'{field}_xy' in filein.keys() for field in field_list):
+                    xy_map = dict((f, np.zeros((nx,ny))) for f in field_list)
+
+                if any(f'{field}_xz' in filein.keys() for field in field_list):
+                    xz_map = dict((f, np.zeros((nx,nz))) for f in field_list)
+
+                if any(f'{field}_yz' in filein.keys() for field in field_list):
+                    yz_map = dict((f, np.zeros((ny,nz))) for f in field_list)
 
             # sanity check!
             if len(field_list) == 0:
@@ -248,19 +263,75 @@ def concat_slice(n,dnamein):
             xs, ys, zs = head['offset'][:]
 
             for f in field_list:
-                xy_map[f][xs:xs+nxl,ys:ys+nyl] += filein[f'{f}_xy']
-                xz_map[f][xs:xs+nxl,zs:zs+nzl] += filein[f'{f}_xz']
-                yz_map[f][ys:ys+nyl,zs:zs+nzl] += filein[f'{f}_yz']
+                if xy_map is not None: xy_map[f][xs:xs+nxl,ys:ys+nyl] += filein[f'{f}_xy']
+                if xz_map is not None: xz_map[f][xs:xs+nxl,zs:zs+nzl] += filein[f'{f}_xz']
+                if yz_map is not None: yz_map[f][ys:ys+nyl,zs:zs+nzl] += filein[f'{f}_yz']
 
     dset = {}
     for f in field_list:
-        dset[f'{f}_xy'] = xy_map[f]
-        dset[f'{f}_xz'] = xz_map[f]
-        dset[f'{f}_yz'] = yz_map[f]
+        if xy_map is not None: dset[f'{f}_xy'] = xy_map[f]
+        if xz_map is not None: dset[f'{f}_xz'] = xz_map[f]
+        if yz_map is not None: dset[f'{f}_yz'] = yz_map[f]
 
     hdr_out['bounds'] = bounds
 
     return hdr_out, dset
+
+concat_slice = partial(concat_2D, kind = "slice")
+concat_slice.__doc__ = """
+    Inherited from Alwin
+
+    Reads files of form dnamein{n}_slice.h5.{rank}, looping over rank.
+
+    Parameters
+    ----------
+    n: integer
+        output number of file
+    dnamein: string
+        directory name of input files, should include '/' at end or leave blank for current directory
+
+    Returns
+    -------
+    hdr_out: dict
+        contains header information
+    dset: dict
+        contains concatenated datasets
+
+    Note
+    ----
+    There's lots of room for improvement.
+    - For starters, we can probably infer the number of slices from the 'nprocs' attribute
+    - we can also probably write directly to the h5 to save ram (probably not relevant)
+    - think about how we can optionally execute with mpi4py
+    """
+
+concat_proj = partial(concat_2D, kind = "proj")
+concat_proj.__doc__ = """
+    Inherited from Alwin
+
+    Reads files of form dnamein{n}_proj.h5.{rank}, looping over rank.
+
+    Parameters
+    ----------
+    n: integer
+        output number of file
+    dnamein: string
+        directory name of input files, should include '/' at end or leave blank for current directory
+
+    Returns
+    -------
+    hdr_out: dict
+        contains header information
+    dset: dict
+        contains concatenated datasets
+
+    Note
+    ----
+    There's lots of room for improvement.
+    - For starters, we can probably infer the number of slices from the 'nprocs' attribute
+    - we can also probably write directly to the h5 to save ram (probably not relevant)
+    - think about how we can optionally execute with mpi4py
+    """
     
 write_concat_slice = partial(_write_concat_h5file, wrapped = concat_slice,
                              out_fname_suffix = 'slice.h5')
@@ -299,3 +370,55 @@ def load_2D_h5(path):
             #print(field)
             data[field] = filein[field][...]
     return hdr_out, data
+
+class _Coordinates:
+    axis_order: Tuple[str,str,str] = ('x','y','z')
+
+class DomainProps:
+    def __init__(self, left_edge, width, dims, units = 'kpc'):
+        import unyt
+        self.domain_left_edge = unyt.unyt_array(left_edge, units)
+        self.domain_width = unyt.unyt_array(width, units)
+        self.domain_dimensions = dims
+        self.coordinates = _Coordinates()
+
+    @property
+    def domain_right_edge(self):
+        return self.domain_left_edge + self.domain_width
+
+    @classmethod
+    def from_hdr(cls, concat_hdr, units = 'kpc'):
+        return cls(left_edge = concat_hdr['bounds'], 
+                   width = concat_hdr['domain'],
+                   dims = concat_hdr['dims'],
+                   units = units)
+
+def cartesian_grid_cc(domain_props, axis, sparse = False):
+    ind = 'xyz'.index(axis)
+    tmp = 0.5 + np.arange(domain_props.domain_dimensions[ind])
+    cell_widths = domain_props.domain_width / domain_props.domain_dimensions
+    vals = domain_props.domain_left_edge[ind] + tmp * cell_widths[ind]
+
+    nominal_shape = [1,1,1]
+    nominal_shape[ind] = domain_props.domain_dimensions[ind]
+    vals.shape = nominal_shape
+    if sparse:
+        return vals
+    return np.broadcast_to(vals, domain_props.domain_dimensions, subok = True)
+
+class PseudoDS:
+    def __init__(self, domain_props, fields):
+        self.domain_props = domain_props
+        self.fields = fields
+    def __getitem__(self, key):
+        if key in self.fields:
+            return self.fields[key]
+        elif key in [('index','x'),('index','y'),('index','z'), ('index','cylindrical_z')]:
+            return cartesian_grid_cc(self.domain_props, key[1][-1:], sparse = False)
+        elif key == ("index", "cylindrical_radius"):
+            return np.sqrt(np.broadcast_to(
+                cartesian_grid_cc(self.domain_props, 'x', sparse =True)**2 + 
+                cartesian_grid_cc(self.domain_props, 'y', sparse =True)**2,
+                shape = self.domain_props.domain_dimensions, subok = True))
+        else:
+            raise KeyError(key)
