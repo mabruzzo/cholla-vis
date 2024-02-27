@@ -93,6 +93,7 @@ def get_profile(profile_arg, field, weight_field = ('gas','mass'), bin_dicts = N
 def show_2D_profile(ax,xedges,yedges, H, lognorm = False,
                     **kwargs):
     X, Y = np.meshgrid(xedges.v, yedges.v)
+    
     H = H.v
 
     if lognorm:
@@ -136,11 +137,25 @@ class My2DProfile:
             H = H.ndview
         return ax.contour(x, y, H.T, *args, **kwargs)
 
-    def show_2D_profile(self, ax, H_name, **kwargs):
+    def show_2D_profile(self, ax, H_name, H_func = None, **kwargs):
+        if H_func is None:
+            H_func = lambda H: H
         return show_2D_profile(
             ax, self.x_edges,self.y_edges, 
-            self.H_dict[H_name], **kwargs
+            H_func(self.H_dict[H_name]), **kwargs
         )
+
+    def bin_grid(self, *, axis, edges = True): # could be faster
+        try:
+            index = {'x' : 0, 'y' : 1, 'both' : slice(0,2,1)}[axis]
+        except KeyError:
+            raise ValueError('axis must be "x", "y", or "both"') from None 
+        if edges:
+            return np.meshgrid(self.x_edges, self.y_edges)[index]
+        else:
+            x = 0.5*(self.x_edges[:-1] + self.x_edges[1:])
+            y = 0.5*(self.y_edges[:-1] + self.y_edges[1:])
+            return np.meshgrid(x, y)[index]
 
     def __call__(self, H_name, x_vals, y_vals):
         x_ind = mydigitize(x_vals, self.x_edges) - 1

@@ -26,7 +26,7 @@ class ChollaUnits:
         self.KB = 1.380658e-16
         self.mu = 0.6
 
-def _getGE(dset,suffix, u):
+def _getGE(dset,suffix, u, domain_dims):
     try:
         return dset[f'GE_{suffix}'][:]
     except KeyError:
@@ -34,20 +34,97 @@ def _getGE(dset,suffix, u):
         KE = 0.5 * ((mx*mx) + (my*my) + (mz*mz)) / dset[f'd_{suffix}'][:]
         return dset[f'E_{suffix}'][:] - KE
 
-def _getTemp(dset, suffix, unit_obj):
+def _getTemp(dset, suffix, unit_obj, domain_dims):
     u = unit_obj
-    ge, den = _getGE(dset,suffix,u), dset[f'd_{suffix}'][:]
+    ge, den = _getGE(dset,suffix,u, domain_dims), dset[f'd_{suffix}'][:]
     n = den * u.DENSITY_UNIT/(u.mu*u.MP)
     return ge * u.PRESSURE_UNIT*(u.gamma - 1)/(n*u.KB)
 
-def _getPhat(dset, suffix, unit_obj):
+def _getPhat(dset, suffix, unit_obj, domain_dims):
     u = unit_obj
-    return _getGE(dset, suffix, u) * u.PRESSURE_UNIT*(u.gamma - 1)/u.KB
+    return _getGE(dset, suffix, u, domain_dims) * u.PRESSURE_UNIT*(u.gamma - 1)/u.KB
 
-def _getNdens(dset, suffix, unit_obj):
+def _getNdens(dset, suffix, unit_obj, domain_dims):
     u = unit_obj
     return dset[f'd_{suffix}'][:] * u.DENSITY_UNIT/(u.mu*u.MP)
 
+def _get_xy(dset, suffix, unit_obj, domain_dims):
+    cur_shape = dset[f'd_{suffix}'].shape
+    domain_shape = np.array([dset['d_xz'].shape[0],
+                             dset['d_xy'].shape[1],
+                             dset['d_xz'].shape[1]])
+    cell_width = domain_dims / domain_shape
+    # assume left edge is -0.5 * domain_dims
+    left_edge = -0.5 * domain_dims
+    if suffix == 'xz':
+        assert cur_shape[0] % 2 == 0
+        x_vals = np.broadcast_to(
+            ((np.arange(domain_shape[0]) + 0.5) * cell_width[0] + left_edge[0])[None].T,
+            shape = cur_shape)
+        # unclear whether y_vals is -0.5 * cell_width[1] OR +0.5*cell_width[1]
+        y_vals = np.broadcast_to(0.5 * cell_width[1],shape = cur_shape)
+    elif suffix == 'yz':
+        assert cur_shape[0] % 2 == 0
+        # unclear whether x_vals is -0.5 * cell_width[0] OR +0.5*cell_width[-]
+        x_vals = np.broadcast_to(0.5 * cell_width[0], shape = cur_shape)
+        y_vals = np.broadcast_to(
+            ((np.arange(domain_shape[1]) + 0.5) * cell_width[1]  + left_edge[1])[None].T,
+            shape = cur_shape)
+    else:
+        x_vals = np.broadcast_to(
+            ((np.arange(domain_shape[0]) + 0.5) * cell_width[0] + left_edge[0])[None].T,
+            shape = cur_shape)
+        y_vals = np.broadcast_to(
+            ((np.arange(domain_shape[1]) + 0.5) * cell_width[1] + left_edge[1])[None],
+            shape = cur_shape)
+    return x_vals, y_vals
+
+def _getVrot(dset, suffix, unit_obj, domain_dims):
+    x_vals, y_vals = _get_xy(dset, suffix, unit_obj, domain_dims)
+
+    theta = np.arctan2(y_vals, x_vals)
+    km_per_LENGTH_UNIT = unit_obj.LENGTH_UNIT / 1e5
+    vel = (-np.sin(theta) * dset[f'mx_{suffix}'] + 
+            np.cos(theta) * dset[f'my_{suffix}']) / dset[f'd_{suffix}']
+    out = vel * (km_per_LENGTH_UNIT / unit_obj.TIME_UNIT)
+    return out
+
+def _getRcylSupport(dset, suffix, unit_obj, domain_dims):
+    vrot2 = np.square(_getVrot(dset, suffix, unit_obj, domain_dims))
+
+    x_vals, y_vals = _get_xy(dset, suffix, unit_obj, domain_dims)    
+    u = unit_obj
+    pressure = _getGE(dset, suffix, u, domain_dims) * (u.gamma - 1)
+
+    def deriv(axis, p, pos):
+        Pderiv = np.empty_like(p)
+        if axis == 0:
+            Pderiv[1:-1,:] = (p[2:,:] - p[:-2,:])/(pos[2:,:] - pos[:-2,:])
+            Pderiv[0,:] = (p[1,:] - p[0,:])/(pos[1,:] - pos[0,:])
+            Pderiv[-1,:] = (p[-1,:] - p[-2,:])/(pos[-1,:] - pos[-2,:])
+        else:
+            Pderiv[:,1:-1] = (p[:,2:] - p[:,:-2])/(pos[:,2:] - pos[:,:-2])
+            Pderiv[:,0] = (p[:,1] - p[:,0])/(pos[:,1] - pos[:,0])
+            Pderiv[:,-1] = (p[:,-1] - p[:,-2])/(pos[:,-1] - pos[:,-2])
+        return Pderiv
+
+    if suffix == 'xz':
+        dPdx = deriv(0, pressure, x_vals)
+        dPdy = 0.0 # an approximation, but its okay
+    elif suffix == 'yz':
+        dPdx = 0.0 # an approximation, but its okay
+        dPdy = deriv(0, pressure, y_vals)
+    else:
+        dPdx = deriv(0, pressure, x_vals)
+        dPdy = deriv(1, pressure, y_vals)
+
+    rcyl_times_dPdr = (x_vals * dPdx + y_vals * dPdy)
+
+    rcyl_times_dPdr_div_rho = rcyl_times_dPdr/dset[f'd_{suffix}']
+
+    km_per_LENGTH_UNIT = unit_obj.LENGTH_UNIT / 1e5
+    pressure_contrib = (rcyl_times_dPdr_div_rho * (km_per_LENGTH_UNIT/unit_obj.TIME_UNIT)**2)
+    return vrot2 + - pressure_contrib
 
 _slice_presets = {
     'temperature' : (_getTemp, 'temperature',
@@ -55,14 +132,16 @@ _slice_presets = {
                         imshow_kwargs = {'cmap' : 'plasma',# 'tab20c',
                                          'vmin' : 3.5, 'vmax' : 9,
                                          'alpha' : 0.95},
-                        cbar_label = r"$\log_{10} T$ [K]")
+                        cbar_label = r"$\log_{10} T$ [K]",
+                        take_log = True)
                     ),
     'phat'        : (_getPhat, r'$p/k_B$',
                      dict(
                         imshow_kwargs = {'cmap' : 'viridis',
-                                         'vmin' : -4, 'vmax' : 5.5,
+                                         'vmin' : 2, 'vmax' : 5.5,
                                          'alpha' : 0.95},
-                        cbar_label = r"$\log_{10} (p / k_B)\ [{\rm K}\, {\rm cm}^{-3}]$")
+                        cbar_label = r"$\log_{10} (p / k_B)\ [{\rm K}\, {\rm cm}^{-3}]$",
+                        take_log = True)
                     ),
     'ndens'       : (_getNdens, 'number density',
                      dict(
@@ -70,15 +149,38 @@ _slice_presets = {
                                          # this is a complete guess
                                          'vmin' : -3, 'vmax' : 3,
                                          'alpha' : 0.95},
-                        cbar_label = r"$\log_{10} n\ [{\rm cm}^{-3}]$")
-                    )
+                        cbar_label = r"$\log_{10} n\ [{\rm cm}^{-3}]$",
+                        take_log = True)
+                    ),
+    'vrot'       : (_getVrot, 'rotational velocity',
+                     dict(
+                        imshow_kwargs = {'cmap' : 'plasma',
+                                         # this is a complete guess
+                                         'vmin' : 0, 'vmax' : 300,
+                                         'alpha' : 0.95},
+                        cbar_label = r"$ v_{\rm rot} [{\rm km} {\rm s^{-1}}]$",
+                        take_log = False)
+                    ),
+    'rcyl_support' : (_getRcylSupport, 'rcyl support',
+                     dict(
+                        imshow_kwargs = {'cmap' : 'plasma',
+                                         # this is a complete guess
+                                         'vmin' : -1 * 100**2, 'vmax' : 300**2,
+                                         'alpha' : 0.95},
+                        cbar_label = (
+                            r"$\left(v_{\rm rot}^2 + "
+                            r"\frac{R}{\rho}\ \left|\frac{dP}{dR}\right|"
+                            r"\right)\ "
+                            r"[{\rm km}^2 {\rm s}^{-2}]$"),
+                        take_log = False)
+                    ),
 }
 
-def _getColDensity_proj(proj_dset, suffix, unit_obj):
+def _getColDensity_proj(proj_dset, suffix, unit_obj, domain_dims):
     u = unit_obj
     return proj_dset[f'd_{suffix}'][:] * u.LENGTH_UNIT * u.DENSITY_UNIT/(u.mu*u.MP)
 
-def _getAvgTemperature_proj(proj_dset, suffix, unit_obj):
+def _getAvgTemperature_proj(proj_dset, suffix, unit_obj, domain_dims):
     # T_{suffix} has units of Kelvin * LENGTH_UNIT * DENSITY_UNIT
     # d_{suffix} has units of LENGTH_UNIT * DENSITY_UNIT
     return proj_dset[f'T_{suffix}'][:] / proj_dset[f'd_{suffix}'][:]
@@ -88,13 +190,15 @@ _proj_presets = {
                         dict(imshow_kwargs = {'cmap' : 'viridis',
                                               'vmin' : 20.0, 'vmax' : 24.25,
                                              },
-                             cbar_label = r"$\log_{10} N\ [{\rm cm}^{-2}]$")
+                             cbar_label = r"$\log_{10} N\ [{\rm cm}^{-2}]$",
+                             take_log = True)
                         ),
     'avg_temperature' : (_getAvgTemperature_proj, 'avg_temperature',
                         dict(imshow_kwargs = {'cmap' : 'plasma',#'magma',
                                               'vmin' : 3.5, 'vmax' : 7
                                              },
-                             cbar_label = r"$\log_{10} \langle T \rangle_{\rm mass-weighted} [{\rm K}]$")
+                             cbar_label = r"$\log_{10} \langle T \rangle_{\rm mass-weighted} [{\rm K}]$",
+                             take_log = True)
                         ),
 }
 
@@ -174,7 +278,7 @@ def _get_particle_props_for_slice(dset, orientation, max_slice_ax_absval = None)
 def doLogSlicePlot2(data, slc_particle_selection, title, extent,
                     imshow_kwargs = {},
                     make_cbar = True, cbar_label = None,
-                    orientation = 'xz'):
+                    orientation = 'xz', take_log = True):
     # from Orlando!
 
     if orientation == 'xz':
@@ -192,7 +296,12 @@ def doLogSlicePlot2(data, slc_particle_selection, title, extent,
 
     ax.tick_params(axis='both', which='major')
 
-    img=ax.imshow(np.log10(data.T),
+    if take_log:
+        vals = np.log10(data.T)
+    else:
+        vals = data.T
+
+    img=ax.imshow(vals,
                   extent=extent,
                   origin = 'lower',
                   **imshow_kwargs)
@@ -262,7 +371,7 @@ def _make_2d_plot(hdr, slc_dset, p_props, u_obj,
               left_edge[im_y_ind], left_edge[im_y_ind] + domain_dims[im_y_ind])
 
     fig, ax, cax = doLogSlicePlot2(
-        fn(slc_dset, orientation, u_obj),
+        fn(slc_dset, orientation, u_obj, domain_dims = domain_dims),
         slc_particle_selection = slc_particle_selection,
         title = f'{quan_name} at {pretty_t_str}',
         extent = extent, orientation = orientation,
