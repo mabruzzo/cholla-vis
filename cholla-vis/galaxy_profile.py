@@ -1,3 +1,6 @@
+import functools
+from typing import Any, NamedTuple, Optional, Tuple
+
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize, LogNorm
 import numpy as np
@@ -6,6 +9,173 @@ import yt
 
 import examination_plot_utils
 from utils import PseudoDS
+
+
+_ABSZ_FIELD = ('index', 'absz')
+
+def try_add_absz(ds):
+    def _abs_z_field(field, data):
+        return np.abs(data[('index', 'z')])
+    field_name = _ABSZ_FIELD
+    if field_name not in ds.derived_field_list:
+        ds.add_field(
+            field_name,
+            function=_abs_z_field,
+            sampling_type="local",
+            units="auto",
+            dimensions="length"
+        )
+
+def try_add_extra_fields(ds):
+
+    _outwardz_velocity_field = ("gas", "outwardz_velocity")
+    def _outwardz_velocity(field, data):
+        out = np.sign(data["index", "z"]) * data["gas", "velocity_z"]
+        out.convert_to_units('code_velocity') # convert in place
+        return out
+
+    def _has_positive_outwardz_velocity(field, data):
+        out = (data[_outwardz_velocity_field].ndview > 0)
+        return unyt.unyt_array(out.astype(np.float64), 'dimensionless')
+
+    def _has_positive_velocity_spherical_radius(field, data):
+        out = (data['gas', 'velocity_spherical_radius'].ndview > 0)
+        return unyt.unyt_array(out.astype(np.float64), 'dimensionless')
+
+    adiabat_K_units = 'cm**4/(g**(2/3)*s**2)'
+    def _adiabat_K(field, data):
+        if np.shape(ds.gamma) == (1,):
+            gamma = ds.gamma[0]
+        else:
+            gamma = ds.gamma
+        assert np.abs((ds.gamma - (5/3)) / (5/3)) < 1e-8
+        tmp = (
+            data['gas', 'pressure'].in_cgs().ndview /
+            (data['gas', 'density'].in_cgs().ndview)**(5/3)
+        )
+        return unyt.unyt_array(tmp, adiabat_K_units)
+
+    def _mass_zsq(field, data):
+        return (
+            data["gas", "cell_mass"] * np.square(data["index", "z"])
+        ).to("code_mass*code_length**2")
+
+    def _massT(field, data):
+        return (
+            data["gas", "cell_mass"] * data["gas", "temperature"]
+        ).to("code_mass*K")
+
+    def _mass_vcirc(field, data):
+        return (
+            data["gas", "cell_mass"] * data["gas", "velocity_cylindrical_theta"]
+        ).to("code_mass*code_length/code_time")
+
+    def _symmetric_theta(field, data):
+        # basically we are taking the absolute value
+        ratio = (data[_ABSZ_FIELD]/data['index', 'spherical_radius'])
+        ratio.convert_to_units('dimensionless') # convert in place
+        return unyt.unyt_array(np.arccos(ratio.ndview),'radian')
+
+    def _pturb_z(field, data):
+        out = np.square(data["gas", "velocity_z"])
+        out *= data["gas", "density"]
+        out.convert_to_units("dyne/cm**2") # convert in place
+        return out
+
+    def _ptot_slab(field, data):
+        # the total pressure in a slab-geometry
+        # -> inspired by Ostriker & Kim 2022
+        #    (while their definition of thermal pressure looks weird, I'm pretty sure
+        #    that's because they have dropped gamma from their sound speed definition
+        #    as in the original TIGRESS paper)
+        out = _pturb_z(field, data)
+        out += data["gas", "pressure"]
+        out.convert_to_units("dyne/cm**2") # convert in place
+        return out
+
+    triples = [
+        (_outwardz_velocity_field, _outwardz_velocity, "code_velocity"),
+        (("index", "has_positive_outwardz_velocity"),
+         _has_positive_outwardz_velocity, "dimensionless"),
+        (("index", "has_positive_velocity_spherical_radius"),
+         _has_positive_velocity_spherical_radius, "dimensionless"),
+        (("gas", "adiabat"), _adiabat_K, adiabat_K_units),
+        (("gas", "mass_zsq"), _mass_zsq, "code_mass*code_length**2"),
+        (("gas", "massT"), _massT, "code_mass*K"),
+        (("gas", "mass_vcirc"), _mass_vcirc, "code_mass*code_length/code_time"),
+        (("index", "symmetric_theta"), _symmetric_theta, "radian"),
+        (("gas", "pressure_tot_slab"), _ptot_slab, "dyne/cm**2")
+    ]
+    for field_name, fn, units in triples:
+        if field_name not in ds.derived_field_list:
+            ds.add_field(
+                field_name,
+                function=fn,
+                force_override=True,
+                sampling_type="local",
+                units=units,
+            )
+
+def add_flux_fields(ds, radial):
+    if radial:
+        vfield = ('gas', 'velocity_spherical_radius')
+        _rho_flux_field = ("gas", "flux_rho_spherical_radius")
+        _momentum_flux_field = ("gas", "flux_momentum_spherical_radius")
+        _e_flux_field = ("gas", "flux_e_spherical_radius")
+    else:
+        vfield = ("gas", "outwardz_velocity")
+        _rho_flux_field = ("gas", "flux_rho_outwardz")
+        _momentum_flux_field = ("gas", "flux_momentum_outwardz")
+        _e_flux_field = ("gas", "flux_e_outwardz")
+
+    def _rho_flux(field, data):
+        rho = data["gas", "density"]
+        vel = data[vfield]
+        return rho * vel
+
+    def _momentum_flux(field, data):
+        rho = data["gas", "density"]
+        vel = data[vfield]
+        p = data["gas", "pressure"]
+        return rho * vel*vel + p
+
+    gamma = ds.gamma
+    gamma_div_gm1 = gamma/(gamma-1)
+    def _e_flux(field, data):
+        rho = data["gas", "density"]
+        vel = data[vfield]
+        p = data["gas", "pressure"]
+
+        v_sq = (
+            np.square(data['gas', 'velocity_x']) +
+            np.square(data['gas', 'velocity_y']) +
+            np.square(data['gas', 'velocity_z'])
+        )
+
+        bernoulli = (
+            (0.5 * v_sq) +
+            gamma_div_gm1 * (p / rho)
+        )
+        return rho * vel * bernoulli
+
+    field_sets = [
+        (_rho_flux_field, _rho_flux,
+         unyt.dimensions.velocity * unyt.dimensions.density),
+        (_momentum_flux_field, _momentum_flux,
+         unyt.dimensions.mass / (unyt.dimensions.length * unyt.dimensions.time**2)),
+        (_e_flux_field, _e_flux,
+         unyt.dimensions.velocity**3 * unyt.dimensions.density)
+    ]
+    for field_name, fn, dimensions in field_sets:
+        if field_name not in ds.derived_field_list:
+            ds.add_field(
+                field_name,
+                function=fn,
+                force_override=True,
+                sampling_type="local",
+                units="auto",
+                dimensions=dimensions
+            )
 
 def _get_override_bins(ds):
     tmp = examination_plot_utils.cell_widths(ds)
@@ -36,7 +206,7 @@ def get_profile(profile_arg, field, weight_field = ('gas','mass'), bin_dicts = N
         codeL='kpc'
         codeL_uq = unyt.kpc
     else:
-        ds, grid = ds_grid_pair
+        ds, grid = profile_arg
         data_src = grid
         dflt_radial_bins, dflt_z_bins = _get_override_bins(ds)
         codeL='code_length'
@@ -90,28 +260,30 @@ def get_profile(profile_arg, field, weight_field = ('gas','mass'), bin_dicts = N
     # x,y, h_field, H_weight
     return radial_bins, z_bins, H_field, H_weight
 
-def show_2D_profile(ax,xedges,yedges, H, lognorm = False,
-                    **kwargs):
-    X, Y = np.meshgrid(xedges.v, yedges.v)
-    
-    H = H.v
 
-    if lognorm:
-        if np.isnan(H).any():
-            H = np.copy(H)
-            H[np.isnan(H)] = 0
-        w = H > 0
-        if not w.any():
-            print('no positive values')
-            return
-        vmin = H[H>0].min()
-        vmax = H.max()
-        kwargs['norm'] = LogNorm(vmin,vmax)
-    return ax.pcolormesh(X, Y, H.T, **kwargs)
 
 def mydigitize(x, bins):
     x = x.to(bins.units)
     return np.digitize(x.ndview,bins.ndview)
+
+class My1DProfile:
+    def __init__(self, edges, data):
+        self.edges, self.data = edges,data
+
+    def __call__(self, x):
+        ind = mydigitize(x, self.edges) - 1
+        w = np.logical_and(x >= self.edges.min(),
+                           x < self.edges.max())
+        if w.all():
+            return self.data[ind]
+        else:
+            out = unyt.unyt_array(
+                np.empty(shape = x.shape, dtype = 'f8'),
+                self.data.units
+            )
+            out.ndview[w] = self.data.ndview[ind[w]]
+            out.ndview[~w] = np.nan
+            return out
 
 class My2DProfile:
     def __init__(self, x_edges, y_edges, H_dict,
@@ -184,35 +356,88 @@ class My2DProfile:
     def H_names(self):
         return list(self.H_dict.keys())
 
-def add_corrected_vxy_field(profile, ds = None, force_override = True):
+    def new_profile_from_ratio(self, out_field_name, num_field, denom_field):
+        return My2DProfile(
+            x_edges=self.x_edges,
+            y_edges=self.y_edges,
+            H_dict = {out_field_name : self.H_dict[num_field]/self.H_dict[denom_field]},
+            x_field = self.x_field,
+            y_field = self.y_field
+        )
 
-    def _corrected_vxy(field, data):
+    def averaged_1D_profile(self, y_index, num_field, denom_field):
+        numerator = self.H_dict[num_field]
+        denominator = self.H_dict[denom_field]
+        if isinstance(y_index, int):
+            numerator = numerator[:, y_index]
+            denominator = denominator[:, y_index]
+        else:
+            assert y_index is not None
+            numerator = numerator[:,y_index].sum(axis=1)
+            denominator = denominator[:,y_index].sum(axis=1)
+        return My1DProfile(self.x_edges, numerator/denominator)
+
+def add_corrected_vxy_field(profile, ds = None,
+                            field_prefix = "corrected",
+                            vrot_comp_prefix = 'avgvrot',
+                            force_override = True,
+                            use_abs_z = False):
+
+    def _component_from_vrot(field, data):
         x_vals = data['index','x']
         y_vals = data['index','y']
-        z_vals = data['index','z']
+        if use_abs_z:
+            z_vals = data[_ABSZ_FIELD]
+        else:
+            z_vals = data['index','z']
 
         cyl_r = np.sqrt(x_vals * x_vals + y_vals * y_vals)
         cyl_theta = np.arctan2(y_vals.to(x_vals.units).ndview, 
                                x_vals.ndview)
         cyl_r = data['index','cylindrical_radius']
-        avg_vcyltheta = profile(H_name = ('gas', 'velocity_cylindrical_theta'), 
-                                x_vals = cyl_r, y_vals = z_vals)
+        if isinstance(profile, My2DProfile):
+            avg_vcyltheta = profile(H_name = ('gas', 'velocity_cylindrical_theta'), 
+                                    x_vals = cyl_r, y_vals = z_vals)
+        elif isinstance(profile, My1DProfile):
+            avg_vcyltheta = profile(cyl_r)
+        else:
+            raise RuntimeError()
+
         if field.name[1][-1] == 'x':
             xhat = - np.sin(cyl_theta) # xhat dot thetahat
-            return data['gas','velocity_x'] - xhat * avg_vcyltheta
+            return xhat * avg_vcyltheta
         elif field.name[1][-1] == 'y':
             yhat = np.cos(cyl_theta) # yhat dot thetahat
-            return data['gas','velocity_y'] - yhat * avg_vcyltheta
+            return yhat * avg_vcyltheta
+        else:
+            raise RuntimeError()
 
-    kwargs = dict(function=_corrected_vxy,
-                  sampling_type="local", units="auto",
+    def _corrected_vxy(field, data):
+        if field.name[1][-1] == 'x':
+            vx_rot = _component_from_vrot(field, data)
+            return data['gas','velocity_x'] - vx_rot
+        elif field.name[1][-1] == 'y':
+            vy_rot = _component_from_vrot(field, data)
+            return data['gas','velocity_y'] - vy_rot
+        else:
+            raise RuntimeError()
+    if use_abs_z:
+        try_add_absz(ds)
+
+    kwargs = dict(sampling_type="local", units="auto",
                   dimensions=unyt.dimensions.velocity,
                   force_override = force_override)
-    for field in [('gas', 'corrected_vx'), ('gas', 'corrected_vy')]:
+    for field in [('gas', f'{field_prefix}_vx'), ('gas', f'{field_prefix}_vy')]:
         if ds is not None:
-            ds.add_field(field, **kwargs)
+            ds.add_field(field, function=_corrected_vxy, **kwargs)
         else:
-            yt.add_field(field, **kwargs)
+            yt.add_field(field, function=_corrected_vxy, **kwargs)
+
+    for field in [('gas', f'{vrot_comp_prefix}_vx'), ('gas', f'{vrot_comp_prefix}_vy')]:
+        if ds is not None:
+            ds.add_field(field, function=_component_from_vrot, **kwargs)
+        else:
+            yt.add_field(field, function=_component_from_vrot, **kwargs)
 
 def _build_profile(profile_arg, field_l, weight_field, bin_dicts):
     temp = {}
@@ -268,55 +493,191 @@ def build_profile(data, make_plot = True, field_l = [('gas', 'velocity_cylindric
         plot_out = (fig,axgrid)
     return myprof, plot_out
 
-def build_galaxy_profile(ds, fields, data_source = None, weight_field = None, bins_rcyl = 64, bins_z = 64,
-                         range_rcyl = None, range_z = None):
+
+
+class _Prop(NamedTuple):
+    name: str
+    field: Tuple[str, str]
+    bins: Any
+    range_arg: Any
+
+    def get_range(self, ds):
+        if self.range_arg is not None:
+            return self.range_arg
+        assert ds.coordinates.axis_order == ('x', 'y', 'z')
+        if self.name == 'rcyl':
+            tmp = np.maximum(np.abs(ds.domain_left_edge[:2]),
+                             np.abs(ds.domain_right_edge[:2]))
+            return [0.0, np.linalg.norm(tmp.ndview)]
+        elif self.name == 'z':
+            pair = [ds.domain_left_edge[2].ndview,
+                    ds.domain_right_edge[2].ndview]
+            if self.field == _ABSZ_FIELD:
+                return [0.0, np.amax(np.abs(pair))]
+            return pair
+        raise RuntimeError("should be unreachable")
+
+def _create_galaxy_profile_binkwargs(
+    ds, bins_rcyl = 64, bins_z = 64,
+    range_rcyl = None, range_z = None,
+    use_abs_z = False,
+    extra_field_bins_pair = None
+):
+
     import operator
     override_bins = {}
 
-    for name, bin_field, bins, range_arg in [('rcyl', ('index', 'cylindrical_radius'), bins_rcyl, range_rcyl),
-                                              ('z', ('index', 'z'), bins_z, range_z)]:
-        bins_ndim = np.ndim(bins)
+    if use_abs_z:
+        try_add_absz(ds)
+        z_field = _ABSZ_FIELD
+    else:
+        z_field = ('index', 'z')
+
+    props = [
+        _Prop('rcyl', ('index', 'cylindrical_radius'), bins_rcyl, range_rcyl),
+        _Prop('z', z_field, bins_z, range_z),
+    ]
+
+    for prop in props:
+        bins_ndim = np.ndim(prop.bins)
         if bins_ndim > 1:
-            raise ValueError(f"bins_{name} must be a scalar or a 1D array")
+            raise ValueError(
+                f"bins_{prop.name} must be a scalar or a 1D array"
+            )
         elif (bins_ndim == 1) and np.size(bins) < 2:
-            raise ValueError(f"when bins_{name} is a 1D array, it must contain at least 2 entries")
-        elif (bins_ndim == 1) and (range_arg is not None):
-            raise ValueError(f"when bins_{name} is a 1D array, f'range_{name} must not be specified")
+            raise ValueError(
+                f"when bins_{prop.name} is a 1D array, it must contain at "
+                "least 2 entries"
+            )
+        elif (bins_ndim == 1) and (prop.range_arg is not None):
+            raise ValueError(
+                f"when bins_{prop.name} is a 1D array, range_{prop.name} "
+                "must not be specified")
         elif (bins_ndim == 1):
-            override_bins[bin_field] = bins
+            override_bins[bin_field] = prop.bins
         else:
             try: # logic borrowed from numpy
-                bins_count = operator.index(bins)
+                bins_count = operator.index(prop.bins)
             except:
-                raise TypeError(f"bins_{name} must be an integer or 1D array")
+                raise TypeError(
+                    f"bins_{prop.name} must be an integer or 1D array"
+                )
             if bins_count < 1:
-                raise ValueError(f"when bins_{name} is an integer, it must be positive")
-            if range_arg is None:
-                assert ds.coordinates.axis_order == ('x', 'y', 'z')
-                if name == 'rcyl':
-                    tmp = np.maximum(np.abs(ds.domain_left_edge[:2]),
-                                     np.abs(ds.domain_right_edge[:2]))
-                    range_arg = [0.0, np.linalg.norm(tmp.ndview)]
-                elif name == 'z':
-                    range_arg = [ds.domain_left_edge[2].ndview,
-                                 ds.domain_right_edge[2].ndview,]
-                else:
-                    raise RuntimeError("should be unreachable")
+                raise ValueError(
+                    f"when bins_{prop.name} is an integer, it must be "
+                    "positive"
+                )
+            range_arg = prop.get_range(ds)
             assert range_arg[0] < range_arg[1]
-            override_bins[bin_field] = np.linspace(range_arg[0],  range_arg[1], num = bins_count + 1)
+            override_bins[prop.field] = np.linspace(
+                range_arg[0],  range_arg[1], num = bins_count + 1
+            )
 
-    #print(override_bins)
+    out = dict(
+        bin_fields = [p.field for p in props],
+        units = {p.field : 'code_length' for p in props},
+        override_bins = override_bins
+    )
+    if extra_field_bins_pair is not None:
+        assert len(extra_field_bins_pair) == 2
+        name, override_bins = extra_field_bins_pair
+        assert name in ds.derived_field_list
+        assert isinstance(override_bins, unyt.unyt_array)
+        out['bin_fields'].append(name)
+        out['units'][name] = str(override_bins.units)
+        out['override_bins'][name] = override_bins.ndview
+    return out
+
+def build_galaxy_profile(ds, fields, data_source = None, weight_field = None, bins_rcyl = 64, bins_z = 64,
+                         range_rcyl = None, range_z = None, use_abs_z = False, return_ytprof = False):
+    
+    kwargs = _create_galaxy_profile_binkwargs(
+        ds,
+        bins_rcyl=bins_rcyl,
+        bins_z=bins_z,
+        range_rcyl=range_rcyl,
+        range_z=range_z,
+        use_abs_z=use_abs_z
+    )
+
     if data_source is None:
         data_source = ds.all_data()
 
-    prof = yt.create_profile(data_source, fields = fields, weight_field = weight_field,
-                             bin_fields = [('index', 'cylindrical_radius'), ('index', 'z')],
-                             units = {('index', 'cylindrical_radius') : 'code_length',
-                                      ('index', 'z') : 'code_length'},
-                             override_bins = override_bins)
+    prof = yt.create_profile(
+        data_source,
+        fields = fields,
+        weight_field = weight_field,
+        **kwargs
+    )
 
     out = My2DProfile(x_edges = prof.x_bins, y_edges = prof.y_bins,
-                                     x_field = prof.x_field, y_field = prof.y_field,
-                                     H_dict = dict((field,prof[field]) for field in fields))
+                      x_field = prof.x_field, y_field = prof.y_field,
+                      H_dict = dict((field,prof[field]) for field in fields))
+    if return_ytprof:
+        return out, prof
+    else:
+        return out
 
-    return out
+_UNSPECIFIED = object()
+
+def show_yt_prof(ax, prof, data_field, imxfield=None, imyfield=None,
+                 imzfield_idx = _UNSPECIFIED, lognorm = False,
+                 **kwargs):
+    available = {
+        prof.x_field : (prof.x_bins, 0),
+        prof.y_field : (prof.y_bins, 1),
+    }
+    if hasattr(prof, 'z_field'):
+        available[prof.z_field] = (prof.z_bins, 2)
+
+    xedges, imx_curaxis = available[imxfield]
+    yedges, imy_curaxis = available[imyfield]
+
+    if len(available) == 2 and imzfield_idx is not _UNSPECIFIED:
+        raise ValueError()
+    elif len(available) == 3 and imzfield_idx is _UNSPECIFIED:
+        raise ValueError()
+    elif imxfield == imyfield:
+        raise ValueError()
+
+    if len(available) == 3:
+        idx = []
+        for i in range(3):
+            if (i == imx_curaxis) or (i == imy_curaxis):
+                idx.append(slice(None))
+            else:
+                idx.append(imzfield_idx)
+                imz_curaxis = i
+        C = prof[data_field][tuple(idx)]
+        assert C.ndim == 2
+        if imx_curaxis > imz_curaxis: imx_curaxis-=1
+        if imy_curaxis > imz_curaxis: imy_curaxis-=1
+    else:
+        C = prof[data_field]
+
+    if imx_curaxis != 0:
+        C = C.T
+
+
+    return show_2D_profile(ax,xedges,yedges, H=C, lognorm=lognorm,
+                           **kwargs)
+
+def show_2D_profile(ax,xedges,yedges, H, lognorm = False,
+                    **kwargs):
+    X, Y = np.meshgrid(xedges.v, yedges.v)
+    
+    H = H.v
+
+    if lognorm:
+        if np.isnan(H).any():
+            H = np.copy(H)
+            H[np.isnan(H)] = 0
+        w = H > 0
+        if not w.any():
+            print('no positive values')
+            return
+        vmin = H[H>0].min()
+        vmax = H.max()
+        kwargs['norm'] = LogNorm(vmin,vmax)
+    return ax.pcolormesh(X, Y, H.T, **kwargs)
+    

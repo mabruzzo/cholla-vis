@@ -1,6 +1,8 @@
 # defining functionality associated with reading the gravitational potential in as a field
 # and computing fields that store useful derived quantities
 
+import numpy as np
+import unyt
 import yt
 
 from functools import partial
@@ -51,7 +53,7 @@ class PotentialFieldLoader:
     def __init__(self, *, fixed_dirname = None,
                  fixed_snapshot_prefix = None):
         self._fixed_dirname = fixed_dirname
-        self._fixed_snapshot_prefix = None
+        self._fixed_snapshot_prefix = fixed_snapshot_prefix
 
     def construct_path(self, data):
         # data is nominally the "data-argument" of the standard
@@ -59,6 +61,20 @@ class PotentialFieldLoader:
         # specified when deriving fields
 
         dirname, basename = os.path.split(data.filename)
+        # check if snapshot-files are grouped in directories by simulation-cycle
+        # or if all snapshot-files are written to a single flat directory
+        # -> this check uses an imperfect heuristic and may favor the former case
+        #    for certain pathological cases
+        # -> this is OK since the former case is the new default behavior AND even if
+        #    it's not "correct" it can only produces errors when
+        #    self._fixed_snapshot_prefix is not None
+        _guess = f'{os.path.basename(os.path.abspath(dirname))}.h5'
+        if (_guess == basename[:len(_guess)]):
+            dirname = os.path.dirname(dirname) 
+            template = '{dirname}/{prefix}/{prefix}_gravity.h5{suffix}'
+        else:
+            template = '{dirname}/{prefix}_gravity.h5{suffix}'
+
         prefix, suffix = basename.split('.h5')
 
         if self._fixed_dirname is not None:
@@ -67,15 +83,17 @@ class PotentialFieldLoader:
         if self._fixed_snapshot_prefix is not None:
             prefix = self._fixed_snapshot_prefix
 
-        return f'{dirname}/{prefix}_gravity.h5{suffix}'
+        out = template.format(dirname = dirname, prefix = prefix, suffix = suffix)
+        return out
 
     def __call__(self, field, data):
         if isinstance(data, yt.fields.api.FieldDetector):
             block_index = 0
-            return ds.arr(np.ones(data.shape, dtype = 'f8'),
-                                  'code_specific_energy')    
+            return data.ds.arr(np.ones(data.shape, dtype = 'f8'),
+                               'code_specific_energy')    
 
         active_zone_shape = tuple(data.shape)
+        path = self.construct_path(data)
         with h5py.File(path, 'r') as f:
             potential_dset = f['potential']
             gdepth, shape_with_ghosts, active_idx = \
@@ -89,12 +107,12 @@ class PotentialFieldLoader:
             vals.shape = shape_with_ghosts[::-1]
             vals = np.swapaxes(vals, 0,2)
             # now clip the ghost-zones
-            out = ds.arr(vals[active_idx], 'code_specific_energy')
+            out = data.ds.arr(vals[active_idx], 'code_specific_energy')
             assert out.shape == active_zone_shape
             return out
 
 
-def add_extra_potential_fields(potential_field_func = _potential_field,
+def add_extra_potential_fields(potential_field_func,
                                potential_field_name = ('cholla', 'gravitational_potential'),
                                potential_field_units = 'code_specific_energy',
                                *, ds = None, skip_additional = False,
@@ -148,22 +166,32 @@ def add_extra_potential_fields(potential_field_func = _potential_field,
             rcyl = np.sqrt(x * x + y * y)
             return rcyl, (vrot2 / rcyl)
 
-    def radial_support(field, data):
+    def radial_support(field, data, kind = 'full'):
         cell_width = data.ds.domain_width / data.ds.domain_dimensions
         inverse_density = 1.0/data['cholla','density']
-        pressure = data['gas', 'pressure']
+
         x, y = data['index', 'x'], data['index', 'y']
         rcyl = np.sqrt(x * x + y * y)
-        dP_dx = deriv.grid_deriv(pressure, dx = cell_width[0],
-                                 nominal_order = 2, axis = 0)
-        dP_dy = deriv.grid_deriv(pressure, dx = cell_width[1],
-                                 nominal_order = 2, axis = 1)
-        dP_dr = (x * dP_dx + y * dP_dy) / rcyl
-        invrho_times_dP_div_dR = dP_dr * inverse_density
 
-        vrot2_div_R = (
-            np.square(inverse_density * _momentum_cylindrical_phi(field, data))
-            / rcyl)
+        if kind in ['full', 'negdP_dr', 'invrho_times_negdP_dr']:
+            pressure = data['gas', 'pressure']
+            dP_dx = deriv.grid_deriv(pressure, dx = cell_width[0],
+                                     nominal_order = 2, axis = 0)
+            dP_dy = deriv.grid_deriv(pressure, dx = cell_width[1],
+                                     nominal_order = 2, axis = 1)
+            dP_dr = (x * dP_dx + y * dP_dy) / rcyl
+            invrho_times_dP_div_dR = dP_dr * inverse_density
+
+            if kind == 'negdP_dr':
+                return (-1*dP_dr).to('code_mass / code_length**2 / code_time**2')
+            elif kind == 'invrho_times_negdP_dr':
+                return (-1*invrho_times_dP_div_dR).to('code_length/code_time**2')
+
+        vrot2 = np.square(inverse_density * _momentum_cylindrical_phi(field, data))
+        if kind == 'vrot_sq':
+            return vrot2.to('km**2/s**2')
+        assert kind == 'full', f'problematic value passed to kind: {kind!r}'
+        vrot2_div_R = vrot2 / rcyl
 
         return (vrot2_div_R - invrho_times_dP_div_dR).to('code_length/code_time**2')
 
@@ -202,6 +230,21 @@ def add_extra_potential_fields(potential_field_func = _potential_field,
         {'function' : potential_field_func, 
          'name' : potential_field_name,
          'units' : potential_field_units,
+        },
+
+        {'function' : partial(radial_support, kind = 'invrho_times_negdP_dr'),
+         'name' : ("cholla", f"invrho_times_negdP_dr{suf}"),
+         'units' : 'code_length / code_time**2',
+        },
+
+        {'function' : partial(radial_support, kind = 'negdP_dr'),
+         'name' : ("cholla", f"negdPdr{suf}"),
+         'units' : 'code_mass / code_length**2 / code_time**2'
+        },
+
+        {'function' : partial(radial_support, kind = 'vrot_sq'),
+         'name' : ("cholla", f"vrot_sq{suf}"),
+         'units' : '(km/s)**2',
         },
 
         {'function' : partial(_dPhidR, variant = 'pure-deriv'),
@@ -246,7 +289,7 @@ def add_extra_potential_fields(potential_field_func = _potential_field,
         {'function' : vertical_hse,
          'name' : ("cholla", f"vertical_hse{suf}"),
          'units' : 'dimensionless',
-         'display_name' :
+         'display_name' : (
             r"$\left( "
             r"\frac{1}{\rho}\ \frac{\partial P}{\partial z} + "
             r"\frac{\partial \Phi}{\partial z}\right)\ / "

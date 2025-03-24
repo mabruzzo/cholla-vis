@@ -114,6 +114,15 @@ class NFWHalo:
         C = _GN * self.mass_msun / (self.scale_radius_kpc * self._log_func(self.c_vir))
         return -C * invx_times_ln_1px(x);
 
+    def rho_msun_per_kpc3(self, r_kpc, z_kpc):
+        # may be wrong!
+        Rvir = self.c_vir * self.scale_radius_kpc
+        rho_halo = self.mass_msun * 3 / (4 * np.pi * Rvir * Rvir * Rvir)
+        A_NFW = self._log_func(self.c_vir)
+        x = r_kpc/ Rvir
+        inv_c = 1.0 / self.c_vir
+        return rho_halo / (3 * A_NFW * x * SQUARE(inv_c + x))
+
     def r_accel(self, r_kpc, z_kpc):
         rsphere = np.sqrt(r_kpc**2 + z_kpc**2) # spherical radius
         x = rsphere / self.scale_radius_kpc
@@ -143,7 +152,29 @@ class MiyamotoNagaiDisk:
                   )
         )
         return -self.mass_msun * _GN / denom
-    
+
+    def rho_msun_per_kpc3(self, r_kpc, z_kpc):
+        # may be wrong!
+        left = (
+            SQUARE(self.scale_height_kpc) * self.mass_msun /
+            (4 * np.pi)
+        )
+        z = z_kpc
+        a = self.scale_radius_kpc
+        b = self.scale_height_kpc
+        hypot_zb = np.sqrt(SQUARE(z) + SQUARE(b))
+
+        right_num = (
+            (self.scale_radius_kpc * SQUARE(r_kpc)) +
+            (a + 3 * hypot_zb * SQUARE(a + hypot_zb))
+        )
+        right_denom = (
+            (SQUARE(r_kpc) + SQUARE(a + hypot_zb))**2.5 *
+            hypot_zb**3
+        )
+        right = right_num / right_denom
+        return left * right
+
     def r_accel(self, r_kpc, z_kpc):
         r_kpc, z_kpc = np.broadcast_arrays(r_kpc, z_kpc)
         A = self.scale_radius_kpc + np.sqrt(self.scale_height_kpc**2 + z_kpc**2)
@@ -395,17 +426,25 @@ class HaloGasGenerator:
         rho_rcool = self.rho_0h
         phi_rcool = self.phi_0
         
-        c_sh2 = np.square(self.c_sh)
-
+        
+        delta_phi = phi_fn(r_kpc) - phi_rcool
         if cgols_style:
-            delta_phi = phi_fn(r_kpc) - phi_rcool
+            c_sh2 = np.square(self.c_sh)
+            
 
+            # typo in the CGOLS paper used a '+', rather than a '-'
+            return rho_rcool * np.power(1.0 - gm1 * (phi_fn(r_kpc) - phi_rcool)
+                                        / c_sh2,
+                                        1/gm1)
+        elif True:
+            c_sh2 = self.gamma * np.square(self.c_sh)
             # typo in the CGOLS paper used a '+', rather than a '-'
             return rho_rcool * np.power(1.0 - gm1 * (phi_fn(r_kpc) - phi_rcool)
                                         / c_sh2,
                                         1/gm1)
 
         else:
+            # NOT IMPLEMENTED
             rho_rcool = self.rho_0h
             phi_rcool = self.phi_0
             # compute Phi at r= 0

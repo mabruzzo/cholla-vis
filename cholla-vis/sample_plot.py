@@ -6,13 +6,18 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import glob
 import multiprocessing
 import os
-import os.path
+from typing import Any, Dict, NamedTuple
 
 #from IPython.lib.pretty import pretty
 
 from utils import (
     concat_particles, concat_slice, concat_proj, load_2D_h5
 )
+
+def _calc_vec_rot(x, y, vec_x, vec_y):
+    theta = np.arctan2(y, x)
+    return (-np.sin(theta) * vec_x +
+            np.cos(theta) * vec_y)
 
 class ChollaUnits:
     def __init__(self):
@@ -25,6 +30,10 @@ class ChollaUnits:
         self.gamma = 1.6666667
         self.KB = 1.380658e-16
         self.mu = 0.6
+
+    def km_per_s_per_code_velocity(self):
+        km_per_LENGTH_UNIT = self.LENGTH_UNIT / 1e5
+        return km_per_LENGTH_UNIT/self.TIME_UNIT
 
 def _getGE(dset,suffix, u, domain_dims):
     try:
@@ -48,7 +57,7 @@ def _getNdens(dset, suffix, unit_obj, domain_dims):
     u = unit_obj
     return dset[f'd_{suffix}'][:] * u.DENSITY_UNIT/(u.mu*u.MP)
 
-def _get_xy(dset, suffix, unit_obj, domain_dims):
+def _get_xyz(dset, suffix, unit_obj, domain_dims, only_xy=False):
     cur_shape = dset[f'd_{suffix}'].shape
     domain_shape = np.array([dset['d_xz'].shape[0],
                              dset['d_xy'].shape[1],
@@ -56,43 +65,55 @@ def _get_xy(dset, suffix, unit_obj, domain_dims):
     cell_width = domain_dims / domain_shape
     # assume left edge is -0.5 * domain_dims
     left_edge = -0.5 * domain_dims
+
+    def _get_1d_pos(axis):
+        return (
+            (np.arange(domain_shape[axis]) + 0.5) * cell_width[axis]
+            + left_edge[axis]
+        )
+
+    unbroadcasted = {
+        # unclear if "else clause" is -0.5*cell_width[i] OR +0.5*cell_width[i]
+        name : _get_1d_pos(i) if name in suffix else (0.5 * cell_width[i])
+        for i,name in enumerate('xyz')
+    }
+
     if suffix == 'xz':
         assert cur_shape[0] % 2 == 0
-        x_vals = np.broadcast_to(
-            ((np.arange(domain_shape[0]) + 0.5) * cell_width[0] + left_edge[0])[None].T,
-            shape = cur_shape)
-        # unclear whether y_vals is -0.5 * cell_width[1] OR +0.5*cell_width[1]
-        y_vals = np.broadcast_to(0.5 * cell_width[1],shape = cur_shape)
+        x_vals = np.broadcast_to(unbroadcasted['x'][None].T, shape = cur_shape)
+        y_vals = np.broadcast_to(unbroadcasted['y'], shape = cur_shape)
+        z_vals = np.broadcast_to(unbroadcasted['z'][None], shape = cur_shape)
     elif suffix == 'yz':
         assert cur_shape[0] % 2 == 0
-        # unclear whether x_vals is -0.5 * cell_width[0] OR +0.5*cell_width[-]
-        x_vals = np.broadcast_to(0.5 * cell_width[0], shape = cur_shape)
-        y_vals = np.broadcast_to(
-            ((np.arange(domain_shape[1]) + 0.5) * cell_width[1]  + left_edge[1])[None].T,
-            shape = cur_shape)
+        x_vals = np.broadcast_to(unbroadcasted['x'], shape = cur_shape)
+        y_vals = np.broadcast_to(unbroadcasted['y'][None].T, shape = cur_shape)
+        z_vals = np.broadcast_to(unbroadcasted['z'][None], shape = cur_shape)
     else:
-        x_vals = np.broadcast_to(
-            ((np.arange(domain_shape[0]) + 0.5) * cell_width[0] + left_edge[0])[None].T,
-            shape = cur_shape)
-        y_vals = np.broadcast_to(
-            ((np.arange(domain_shape[1]) + 0.5) * cell_width[1] + left_edge[1])[None],
-            shape = cur_shape)
-    return x_vals, y_vals
+        x_vals = np.broadcast_to(unbroadcasted['x'][None].T, shape = cur_shape)
+        y_vals = np.broadcast_to(unbroadcasted['y'][None], shape = cur_shape)
+        z_vals = np.broadcast_to(unbroadcasted['z'], shape = cur_shape)
+    if only_xy:
+        return x_vals, y_vals
+    return x_vals, y_vals, z_vals
+
+def _get_vcomp_km_per_s(dset, axis, suffix, unit_obj):
+    return (
+        dset[f'm{axis}_{suffix}'] / dset[f'd_{suffix}']
+    ) * unit_obj.km_per_s_per_code_velocity()
+
 
 def _getVrot(dset, suffix, unit_obj, domain_dims):
-    x_vals, y_vals = _get_xy(dset, suffix, unit_obj, domain_dims)
+    x_vals, y_vals = _get_xyz(dset, suffix, unit_obj, domain_dims, only_xy=True)
 
-    theta = np.arctan2(y_vals, x_vals)
-    km_per_LENGTH_UNIT = unit_obj.LENGTH_UNIT / 1e5
-    vel = (-np.sin(theta) * dset[f'mx_{suffix}'] + 
-            np.cos(theta) * dset[f'my_{suffix}']) / dset[f'd_{suffix}']
-    out = vel * (km_per_LENGTH_UNIT / unit_obj.TIME_UNIT)
-    return out
+    vel = _calc_vec_rot(x_vals, y_vals,
+                        dset[f'mx_{suffix}'],
+                        dset[f'my_{suffix}']) / dset[f'd_{suffix}']
+    return vel * unit_obj.km_per_s_per_code_velocity()
 
 def _getRcylSupport(dset, suffix, unit_obj, domain_dims):
     vrot2 = np.square(_getVrot(dset, suffix, unit_obj, domain_dims))
 
-    x_vals, y_vals = _get_xy(dset, suffix, unit_obj, domain_dims)    
+    x_vals, y_vals, z_vals = _get_xyz(dset, suffix, unit_obj, domain_dims)    
     u = unit_obj
     pressure = _getGE(dset, suffix, u, domain_dims) * (u.gamma - 1)
 
@@ -126,11 +147,50 @@ def _getRcylSupport(dset, suffix, unit_obj, domain_dims):
     pressure_contrib = (rcyl_times_dPdr_div_rho * (km_per_LENGTH_UNIT/unit_obj.TIME_UNIT)**2)
     return vrot2 + - pressure_contrib
 
+def _getMomentumMag(dset, suffix, unit_obj, domain_dims):
+    u = unit_obj
+    domain_shape = np.array([dset['d_xz'].shape[0],
+                             dset['d_xy'].shape[1],
+                             dset['d_xz'].shape[1]])
+    cell_width = domain_dims / domain_shape
+    cell_volume = np.prod(cell_width)
+
+    momentum_dens_mag = np.sqrt(
+        np.square(dset[f'mx_{suffix}']) +
+        np.square(dset[f'my_{suffix}']) +
+        np.square(dset[f'mz_{suffix}'])
+    )
+    momentum_mag = momentum_dens_mag * cell_volume
+
+    km_per_LENGTH_UNIT = u.LENGTH_UNIT / 1e5
+    out = momentum_mag * (km_per_LENGTH_UNIT / unit_obj.TIME_UNIT)
+    return out
+
+'''
+class FieldPlotSpec(NamedTuple):
+    fn : callable
+    full_name:
+    latex_repr : str # don't include '$'
+    default_units_repr : str # don't include '$'
+    take_log : bool
+    imshow_kwargs: Dict[str, Any]
+
+def _cbar_label(plot_spec : FieldPlotSpec):
+    prefix, latex_repr_suffix = '$', ''
+    if plot_spec.take_log:
+        prefix = r'$\log_{10} ('
+        latex_repr_suffix = ')'
+
+    return (f'{prefix} {plot_spec.latex_repr}{latex_repr_suffix} '
+            f'[{plot.splecdefault_units_repr}]$')
+'''
+
 _slice_presets = {
     'temperature' : (_getTemp, 'temperature',
                      dict(
                         imshow_kwargs = {'cmap' : 'plasma',# 'tab20c',
-                                         'vmin' : 3.5, 'vmax' : 9,
+                                         'vmin' : 1.0, # 3.5,
+                                         'vmax' : 9,
                                          'alpha' : 0.95},
                         cbar_label = r"$\log_{10} T$ [K]",
                         take_log = True)
@@ -154,9 +214,10 @@ _slice_presets = {
                     ),
     'vrot'       : (_getVrot, 'rotational velocity',
                      dict(
-                        imshow_kwargs = {'cmap' : 'plasma',
+                        imshow_kwargs = {#'cmap' : 'plasma',
+                                         'cmap' : 'coolwarm',
                                          # this is a complete guess
-                                         'vmin' : 0, 'vmax' : 300,
+                                         'vmin' : -400, 'vmax' : 400,
                                          'alpha' : 0.95},
                         cbar_label = r"$ v_{\rm rot} [{\rm km} {\rm s^{-1}}]$",
                         take_log = False)
@@ -173,6 +234,15 @@ _slice_presets = {
                             r"\right)\ "
                             r"[{\rm km}^2 {\rm s}^{-2}]$"),
                         take_log = False)
+                    ),
+    'momentum_mag' : (_getMomentumMag, 'momentum magnitude',
+                      dict(
+                          imshow_kwargs = {'cmap' : 'plasma',
+                                         # this is a complete guess
+                                         'vmin' : -1, 'vmax' : 5,
+                                         'alpha' : 0.95},
+                        cbar_label = r"$ |p| [{\rm M}_\odot\ {\rm km}\ {\rm s}^{-1}]$",
+                        take_log = True)
                     ),
 }
 
@@ -196,6 +266,7 @@ _proj_presets = {
     'avg_temperature' : (_getAvgTemperature_proj, 'avg_temperature',
                         dict(imshow_kwargs = {'cmap' : 'plasma',#'magma',
                                               'vmin' : 3.5, 'vmax' : 7
+                                              #'vmin' : 0.5, 'vmax' : 7
                                              },
                              cbar_label = r"$\log_{10} \langle T \rangle_{\rm mass-weighted} [{\rm K}]$",
                              take_log = True)
@@ -274,13 +345,7 @@ class SliceParticleSelection:
 def _get_particle_props_for_slice(dset, orientation, max_slice_ax_absval = None):
     x,y,z = _particle_pos_xyz(dset)
 
-
-def doLogSlicePlot2(data, slc_particle_selection, title, extent,
-                    imshow_kwargs = {},
-                    make_cbar = True, cbar_label = None,
-                    orientation = 'xz', take_log = True):
-    # from Orlando!
-
+def _add_ax_labels(ax, orientation):
     if orientation == 'xz':
         x_ax_label,y_ax_label = ["x (kpc)", "z (kpc)"]
     elif orientation == 'xy':
@@ -290,9 +355,16 @@ def doLogSlicePlot2(data, slc_particle_selection, title, extent,
     else:
         raise RuntimeError(f"unknown orientation: {orientation}")
 
-    fig,ax = plt.subplots(1,1, figsize=(12, 10))
     ax.set_xlabel(x_ax_label)
     ax.set_ylabel(y_ax_label)
+
+def doFullLogSlicePlot2(ax, data, slc_particle_selection, title, extent,
+                        imshow_kwargs = {},
+                        make_cbar = True, cbar_label = None,
+                        orientation = 'xz', take_log = True,
+                        cax = None):
+    # from Orlando!
+    _add_ax_labels(ax, orientation)
 
     ax.tick_params(axis='both', which='major')
 
@@ -318,22 +390,26 @@ def doLogSlicePlot2(data, slc_particle_selection, title, extent,
         plt.colorbar(img, cax=cax)
         if cbar_label is not None:
             plt.ylabel(cbar_label)
-    else:
-        cax = None
+    elif cax is not None:
+        raise RuntimeError("you can't set make_cbar=False and provide a cax")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
 
-    return fig,ax,cax
+    return cax
+
+
 
 
 def _rounded_float_to_str(v, decimals = 0):
-    return repr(np.round(v, decimals))
+    return repr(np.round(float(v), decimals))
 
 def _make_2d_plot(hdr, slc_dset, p_props, u_obj,
                   kind = "slice",
                   preset_name = "temperature",
                   orientation = 'xz',
-                  particle_selector = None):
+                  particle_selector = None,
+                  fig = None, ax = None, cax = None,
+                  override_fn = None):
 
     assert kind in ["slice", "proj"]
     cur_t = hdr['t'][0]
@@ -346,37 +422,89 @@ def _make_2d_plot(hdr, slc_dset, p_props, u_obj,
         presets = _proj_presets
     else:
         raise ValueError(f"unknown plot-kind: {kind!r}")
-    if preset_name not in presets:
-        raise ValueError(
-            f"preset_name is unknown: {preset_name}. Known preset names "
-            f"for {kind}-plots include {list(presets.keys())}")
-    fn, quan_name, plot_kwargs = presets[preset_name]
 
     left_edge, domain_dims = hdr['bounds'], hdr['domain']
 
     (im_x_ind,im_y_ind), _ = _orient_to_imx_imy_zax(orientation)
 
     assert orientation in ['xz', 'yz','xy']
-    if (p_props is None) or (kind != "slice"):
-        slc_particle_selection = None
+
+    if override_fn is None:
+
+        if preset_name not in presets:
+            raise ValueError(
+                f"preset_name is unknown: {preset_name}. Known preset names "
+                f"for {kind}-plots include {list(presets.keys())}")
+        fn, quan_name, plot_kwargs = presets[preset_name]
+
+        if (p_props is None) or (kind != "slice"):
+            slc_particle_selection = None
+        else:
+            assert particle_selector is not None
+            max_sliceax_abspos = None if orientation == 'xy' else 0.4
+            slc_particle_selection = particle_selector(
+                p_props = p_props, orientation = orientation,
+                snap_time = cur_t,
+                max_sliceax_abspos = max_sliceax_abspos)
     else:
-        assert particle_selector is not None
-        max_sliceax_abspos = None if orientation == 'xy' else 0.4
-        slc_particle_selection = particle_selector(
-            p_props = p_props, orientation = orientation,
-            snap_time = cur_t,
-            max_sliceax_abspos = max_sliceax_abspos)
+        assert preset_name is None
+
 
     extent = (left_edge[im_x_ind], left_edge[im_x_ind] + domain_dims[im_x_ind],
               left_edge[im_y_ind], left_edge[im_y_ind] + domain_dims[im_y_ind])
 
-    fig, ax, cax = doLogSlicePlot2(
-        fn(slc_dset, orientation, u_obj, domain_dims = domain_dims),
-        slc_particle_selection = slc_particle_selection,
-        title = f'{quan_name} at {pretty_t_str}',
-        extent = extent, orientation = orientation,
-        **plot_kwargs)
+    if fig is None:
+        assert ax is None
+        fig,ax = plt.subplots(1,1, figsize=(12, 10))
+    elif ax is None:
+        raise RuntimeError("fig and ax must both be None or neither can be None")
+
+    if override_fn is None:
+        doFullLogSlicePlot2(
+            ax, fn(slc_dset, orientation, u_obj, domain_dims = domain_dims),
+            slc_particle_selection = slc_particle_selection,
+            title = f'{quan_name} at {pretty_t_str}',
+            extent = extent, orientation = orientation,
+            cax = cax,
+            **plot_kwargs)
+    else:
+        override_fn(
+            ax=ax, slc_dset=slc_dset, orientation=orientation, u_obj=u_obj,
+            domain_dims=domain_dims, extent=extent
+        )
     return fig
+
+def _get_hdr_dset_kind(n, dnamein, plot_proj,
+                       load_distributed_files = False):
+    if plot_proj:
+        kind = "proj"
+        if load_distributed_files:
+            hdr, dset = concat_proj(n,dnamein)
+        else:
+            path = f'{dnamein}/{n}_proj.h5'
+            hdr, dset = load_2D_h5(path)
+    else:
+        kind = "slice"
+        if load_distributed_files:
+            hdr, dset = concat_slice(n, dnamein)
+        else:
+            path = f'{dnamein}/{n}_slice.h5'
+            hdr, dset = load_2D_h5(path)
+    return hdr, dset, kind
+
+def make_slice_panel(fig,ax, dnamein, n, preset_name, orientation,
+                     plot_proj = False,
+                     load_distributed_files = False,
+                     override_fn = None, cax = None):
+    hdr, dset, kind = _get_hdr_dset_kind(
+        n, dnamein, plot_proj, load_distributed_files
+    )
+    return _make_2d_plot(hdr, dset, p_props=None, u_obj = ChollaUnits(),
+                         preset_name = preset_name, orientation = orientation,
+                         particle_selector = None, kind = kind,
+                         fig = fig, ax = ax, cax = cax,
+                         override_fn = override_fn)
+    
 
 def itr_orientation_preset(orientation, preset_name):
     if isinstance(orientation, str):
@@ -398,26 +526,14 @@ def make_slice_plot(dnamein, n, preset_name, orientation,
                     particle_selector = None):
  
     p_props = None
-    if plot_proj:
-        kind = "proj"
-        if load_distributed_files:
-            hdr, dset = concat_proj(n,dnamein)
-        else:
-            path = f'{dnamein}/{n}_proj.h5'
-            hdr, dset = load_2D_h5(path)
-    else:
-        kind = "slice"
-        if load_distributed_files:
-            hdr, dset = concat_slice(n, dnamein)
-        else:
-            path = f'{dnamein}/{n}_slice.h5'
-            hdr, dset = load_2D_h5(path)
+    hdr, dset, kind = _get_hdr_dset_kind(
+        n, dnamein, plot_proj, load_distributed_files
+    )
     if particle_selector is not None:
         if load_distributed_files:
             _, p_props = concat_particles(n, dnamein)
         else:
             raise RuntimeError()
-                
 
     u_obj = ChollaUnits()
 

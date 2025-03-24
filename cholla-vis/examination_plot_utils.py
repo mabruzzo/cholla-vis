@@ -184,8 +184,27 @@ class GridPlotDetails:
 
     @classmethod
     def build_for_slice_grids(cls, ds, coord, coord_val, lims = {}):
-        left_edge, right_edge, shape, leftmost_index = _come_up_with_grid_edges(
-            ds, coord, coord_val, lims = lims)
+        #if isinstance(coord_val, list):
+        #    assert isinstance(coord_val[0], int)
+        #    assert (np.diff(coord_val) == 1).all()
+        #    assert coord == 'z'
+        #    left_edge_f, right_edge_f, shape_f, leftmost_index_f = _come_up_with_grid_edges(
+        #        ds, coord, coord_val[0], lims = lims)
+        #    left_edge_l, right_edge_l, shape_l, leftmost_index_l = _come_up_with_grid_edges(
+        #        ds, coord, coord_val[-1], lims = lims)
+        #    assert (left_edge_f[:-1] == left_edge_l[:-1]).all()
+        #    assert (right_edge_f[:-1] == right_edge_l[:-1]).all()
+        #    assert (leftmost_index_f[:-1] == leftmost_index_l[:-1])
+        #    assert shape_f == shape_l
+        #    left_edge = left_edge_f
+        #    right_edge = right_edge_l
+        #    shape = left_edge
+        #    
+        #    
+        #else:
+        if True:
+            left_edge, right_edge, shape, leftmost_index = _come_up_with_grid_edges(
+                ds, coord, coord_val, lims = lims)
 
         if not (ds.domain_left_edge <= left_edge).all():
             raise RuntimeError(
@@ -225,10 +244,12 @@ class GridPlotDetails:
         return True
 
     def idx_to_specified_grid_idx(self, idx, grid):
+        # to be used when we provide a pre-created grid
         widths = cell_widths(grid.ds)
         left_edge_cell_offsets = (
             (np.abs(self.left_edge - grid.LeftEdge) / widths).to('dimensionless').v
         )
+        
         num_shift = (left_edge_cell_offsets + 0.5).astype(int)
         if np.any(left_edge_cell_offsets <= -0.5):
             raise ValueError(f"The left edge of grid, {grid.LeftEdge}, lies to the right "
@@ -241,10 +262,18 @@ class GridPlotDetails:
         nominal_slc_start = self.leftmost_index
 
         def update_slice(slc, i):
-            if slc.start is None:
+            if num_shift[i] == 0:
+                start = 0 if slc.start is None else slc.start
+                stop = start + nominal_slc_len[i]
+                return slice(start,stop,slc.step)
+                    
+            raise RuntimeError("this logic isn't well tested")
+            # the following logic isn't well tested
+            if (slc.start is None):
                 start = nominal_slc_start[i] + num_shift[i]
             else:
-                start = nominal_slc_stop
+                raise RuntimeError()
+
             if slc.stop is None:
                 stop = start + nominal_slc_len[i]
             else:
@@ -288,7 +317,7 @@ def plot_slice_grid2(ax, ds, coord, coord_val, field, lims = {},
     elif coord == 'z':
         im_x_label,im_y_label = ('$x$ [code length]', '$y$ [code length]')
         x_slc,y_slc = slice(None), slice(None)
-        idx = (x_slc, y_slc, ind - grid_details.leftmost_index[0])
+        idx = (x_slc, y_slc, ind - grid_details.leftmost_index[2])
 
         # I don't think we need to add 1 to slc.stop
         imshow_extent = (grid_details.left_edge[0].v, grid_details.right_edge[0].v,
@@ -309,7 +338,7 @@ def plot_slice_grid2(ax, ds, coord, coord_val, field, lims = {},
     img = ax.imshow(vals.T, extent = imshow_extent, interpolation = 'none', 
                      origin = 'lower', **kwargs)
 
-    extrema = (vals.min(), vals.max())
+    extrema = (np.nanmin(vals), vals.max())
     if set_axis_label:
         ax.set_xlabel(im_x_label)
         ax.set_ylabel(im_y_label)
