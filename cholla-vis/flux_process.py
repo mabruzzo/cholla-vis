@@ -12,20 +12,10 @@ import os.path
 from types import MappingProxyType
 from typing import NamedTuple
 
-_PREFIX = '/ix/eschneider/mabruzzo/hydro/galactic-center/analysis-data/'
-_REGISTRY = {}
-
-def get_registry():
-    if len(_REGISTRY) == 0:
-        with os.scandir(_PREFIX) as it:
-            for entry in filter(lambda e: e.is_dir(), it):
-                _REGISTRY[entry.name] = entry.path
-
-    return MappingProxyType(_REGISTRY)
-
+from registry import get_data_registry
 
 def get_data_names(sim_name, data_name):
-    path = get_registry()[sim_name]
+    path = get_data_registry()[sim_name]
     l = []
     with os.scandir(os.path.join(path, data_name)) as it:
         for entry in filter(lambda e: e.is_file(), it):
