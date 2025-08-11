@@ -1,21 +1,16 @@
-import pandas as pd
+import h5py
 import numpy as np
 import unyt
 import yt
 
 from dataclasses import dataclass
-import functools
-import glob
-import multiprocessing
 import os
-import os.path
-from types import MappingProxyType
 from typing import NamedTuple
 
-from registry import get_data_registry
+from .registry import get_intermediate_data_registry
 
 def get_data_names(sim_name, data_name):
-    path = get_data_registry()[sim_name]
+    path = get_intermediate_data_registry()[sim_name]
     l = []
     with os.scandir(os.path.join(path, data_name)) as it:
         for entry in filter(lambda e: e.is_file(), it):
@@ -69,7 +64,8 @@ def find_bin_index(val, bins):
     nbins = len(bins)
     index = np.digitize(val, bins)
     # index of 0 corresponds to being on the left of the lowest bin_edge
-    # index of nbins+1 corresponds to being on the right of the largest bin_edge
+    # index of nbins+1 corresponds to being on the right of the largest
+    # bin_edge
     # -> effectively you could think of this as 1-based indexing of the bin
     assert np.all(index > 0)
     assert np.all(index <= nbins)
@@ -282,10 +278,6 @@ def _gather_fluxes(
     
     return out
 
-
-
-import h5py
-
 def _convert_Myr_stamps_to_kyr(arr):
     return np.trunc(arr * 1000 +0.5).astype('i8')
 
@@ -368,8 +360,7 @@ def write_data(out_name, net, outflow):
     # deal with the "weight_sum:"
     shape = (3, n_union,) + net['weight_sum'].shape[1:]
     cell_count = np.full(shape = shape, fill_value = np.nan, dtype = 'f8')
-    _get_cell_counts(cell_count, idx_net_outarray, net,
-                     idx_outflow_outarray, outflow)
+    _get_cell_counts(cell_count, idx_net_outarray, net, idx_outflow_outarray, outflow)
     datasets['cell_count'] = cell_count
 
     # gather up the fluxes
@@ -460,8 +451,12 @@ def _collect(kind, choice = 'net', single_conf = True, sim_names = None):
     yt.set_log_level(40)
 
     if sim_names is None:
-        sim_names = ['708cube_GasStaticG-1Einj_restart-TIcool', '708cube_GasStaticG-1Einj',
-                     '708cube_GasStaticG-2Einj_restart-TIcool', '708cube_GasStaticG-2Einj']
+        sim_names = [
+            '708cube_GasStaticG-1Einj_restart-TIcool',
+            '708cube_GasStaticG-1Einj',
+            '708cube_GasStaticG-2Einj_restart-TIcool',
+            '708cube_GasStaticG-2Einj'
+        ]
 
     out = {}
     
@@ -480,10 +475,13 @@ def _collect(kind, choice = 'net', single_conf = True, sim_names = None):
 
 def _collect_and_save():
     prefix = '/ihome/eschneider/mwa25/cholla-bugfixing/galactic-center-analysis/'
-    for sim_name in ['708cube_GasStaticG-1Einj_restart-TIcool', '708cube_GasStaticG-1Einj',
-                     '708cube_GasStaticG-2Einj_restart-TIcool', '708cube_GasStaticG-2Einj']:
+    for sim_name in [
+        '708cube_GasStaticG-1Einj_restart-TIcool',
+        '708cube_GasStaticG-1Einj',
+        '708cube_GasStaticG-2Einj_restart-TIcool',
+        '708cube_GasStaticG-2Einj'
+    ]:
 
-        
         _kw = dict(single_conf = False, sim_names = [sim_name])
         
         rflux_datasets_net_cylrad = _collect("r_fluxes", **_kw)

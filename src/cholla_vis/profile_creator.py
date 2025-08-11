@@ -14,7 +14,7 @@ import yt
 if __name__ == '__main__':
     yt.enable_parallelism()
 
-import galaxy_profile
+from cholla_vis import galaxy_profile
 
 _TBIN_EDGES = [
     (0.0, None),

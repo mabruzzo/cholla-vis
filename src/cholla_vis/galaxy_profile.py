@@ -7,8 +7,8 @@ import numpy as np
 import unyt
 import yt
 
-import examination_plot_utils
-from utils import PseudoDS
+import cholla_vis.examination_plot_utils
+from .utils import PseudoDS
 
 
 _ABSZ_FIELD = ('index', 'absz')
