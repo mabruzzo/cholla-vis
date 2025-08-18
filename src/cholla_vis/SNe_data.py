@@ -1,0 +1,18 @@
+# we probably want to shuffle things around...
+
+import os
+
+import pandas as pd
+
+from .registry import _get_processed_data_dir
+
+def load_SNe_dataset(sim_name, *, data_dir_prefix=None):
+
+    if data_dir_prefix is None:
+        data_dir_prefix = _get_processed_data_dir()
+
+    # load the supernova rate data
+    return pd.read_csv(
+        os.path.join(data_dir_prefix, "SNe-rate-data", f"{sim_name}.csv"),
+        index_col = 't_kyr'
+    )

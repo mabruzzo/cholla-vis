@@ -1,6 +1,3 @@
-
-_DATA_PREFIX = '/Users/mabruzzo/Dropbox/research/mw-wind/data/processed'
-
 import h5py
 import numpy as np
 import pandas as pd
@@ -15,14 +12,9 @@ from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from cholla_vis.registry import get_intermediate_data_registry
+from cholla_vis.SNe_data import load_SNe_dataset
 from cholla_vis.flux.fluxes import load_flux_data, FluxData
 
-
-def load_SNe_dataset(sim_name, *, data_dir_prefix=None):
-    # load the supernova rate data
-    return pd.read_csv(
-        f'{_DATA_PREFIX}/SNe-rate-data/{sim_name}.csv', index_col = 't_kyr'
-    )
 
 def bicone_surface_area(spherical_radii, openning_angle_rad):
     # calculate surface area at each radius

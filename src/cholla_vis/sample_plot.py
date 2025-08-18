@@ -10,7 +10,7 @@ from typing import Any, Dict, NamedTuple
 
 #from IPython.lib.pretty import pretty
 
-from utils import (
+from .utils import (
     concat_particles, concat_slice, concat_proj, load_2D_h5
 )
 
