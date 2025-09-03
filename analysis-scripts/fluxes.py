@@ -2,6 +2,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import unyt
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
@@ -14,92 +15,7 @@ from typing import Any, NamedTuple
 from cholla_vis.registry import get_intermediate_data_registry
 from cholla_vis.SNe_data import load_SNe_dataset
 from cholla_vis.flux.fluxes import load_flux_data, FluxData
-
-
-def bicone_surface_area(spherical_radii, openning_angle_rad):
-    # calculate surface area at each radius
-
-    # 1. calculate solid angle subtended by a single cone
-    #  -> Omega = 2*pi*(1 - cos(theta)),
-    #     where theta is half of the openning angle
-    #  -> https://en.wikipedia.org/wiki/Solid_angle#Cone,_spherical_cap,_hemisphere
-    theta_rad = 0.5*openning_angle_rad
-    solid_angle_single_cone = 2.0 * np.pi * (1.0 - np.cos(theta_rad))
-
-    # 2. get solid angle of the bicone
-    solid_angle = 2.0 * solid_angle_single_cone
-
-    # 3. get surface area
-    return spherical_radii * spherical_radii * solid_angle
-
-
-class RefFluxCalculator:
-    """
-    Calculate reference fluxes as defined in
-    https://ui.adsabs.harvard.edu/abs/2020ApJ...900...61K/abstract
-    """
-
-    def __init__(self, sim_name, SNe_dataset, use_lo):
-        
-        if '1Einj' in sim_name:
-            E_SNinj = unyt.unyt_quantity(1e51, 'erg')
-        elif '2Einj' in sim_name:
-            E_SNinj = unyt.unyt_quantity(2e51, 'erg')
-        else:
-            raise RuntimeError()
-
-        # given below eqn 19
-        v_cool = unyt.unyt_quantity(200.0, 'km/s')
-
-        # equations: 16-18
-        self._refquan = {
-            # maybe we should pick a rounder number? like 100
-            'density' : unyt.unyt_quantity(95.5, 'Msun'),
-            # there is an alternative explanation suggested in the paper
-            # (maybe consider that)
-            'momentum' : 0.5 * E_SNinj / v_cool,
-            'energy' : E_SNinj
-        }
-
-        assert SNe_dataset.index.name == 't_kyr'
-        self.t_Myr = SNe_dataset.index.to_numpy() / 1000.0
-
-        key = 'num_per_kyr_lo' if use_lo else 'num_per_kyr_hi'
-        self._SN_rate = unyt.unyt_array(
-            SNe_dataset[key].to_numpy() /1000.0, units='year**-1'
-        )
-
-
-    def _ref_time_derive_it(self):
-        for key, qref in self._refquan.items():
-            yield (key, qref * self._SN_rate)
-
-    def ref_time_deriv(self):
-        return dict(self._ref_time_derive_it())
-
-    def _flux_helper(self, surface_area):
-        assert isinstance(surface_area, np.ndarray)
-        if surface_area.ndim == 0:
-            surface_area = surface_area[None]
-        # eqn 15:
-        out = {
-            key: t_deriv[None, :] / surface_area[:, None]
-            for key, t_deriv in self._ref_time_derive_it()
-        }
-        return out
-
-    def z_flux(self, cylindrical_radius):
-        surface_area = np.pi * cylindrical_radius**2
-        # double surface area to include contribution from below
-        surface_area *= 2
-        return self._flux_helper(surface_area)
-        
-
-    def r_flux(self, spherical_radii, openning_angle_rad):
-        surface_area = bicone_surface_area(spherical_radii, openning_angle_rad)
-        print(surface_area)
-        return self._flux_helper(surface_area)
-
+from cholla_vis.flux.ref_fluxes import bicone_surface_area, RefFluxCalculator
 
 @dataclass
 class _FundamentalQuanDescr:
@@ -144,17 +60,17 @@ def _derive_prop_map(fundamental_descr_map, for_fluxes):
         out[key] = (units, label)
     return out
 
-derive_tderiv_props = functools.partial(
-    _derive_prop_map,
-    fundamental_descr_map=_FUNDAMENTAL_QUAN_DESCR_MAP,
-    for_fluxes=False
-)
-
-derive_flux_props = functools.partial(
-    _derive_prop_map,
-    fundamental_descr_map=_FUNDAMENTAL_QUAN_DESCR_MAP,
-    for_fluxes=True
-)
+#derive_tderiv_props = functools.partial(
+#    _derive_prop_map,
+#    fundamental_descr_map=_FUNDAMENTAL_QUAN_DESCR_MAP,
+#    for_fluxes=False
+#)
+#
+#derive_flux_props = functools.partial(
+#    _derive_prop_map,
+#    fundamental_descr_map=_FUNDAMENTAL_QUAN_DESCR_MAP,
+#    for_fluxes=True
+#)
 
 
 def _add_arbitrary_legend(
@@ -212,43 +128,46 @@ def _add_kind_legend(ax, choice_ls_map, line_color = None,
 def _find_index(val, arr):
     return np.argmax(np.isclose(val, arr))
 
-def _averaged_flux_properties_old(
-    target_t_Myr, quan, flux_data, duration_Myr,
-    time_idx = None,
-):
-
-    # time runs along axis 0 of flux_data[quan]
-    if duration_Myr == 0:
-        assert time_idx is None
-        idx = _find_index(target_t_Myr, flux_data['t_Myr'])
-        assert np.isclose(flux_data['t_Myr'][idx], target_t_Myr)
-    else:
-        t_Myr_vals = flux_data['t_Myr']
-        lo = (target_t_Myr-0.5*duration_Myr)
-        hi = (target_t_Myr+0.5*duration_Myr)
-        w_temp = np.logical_and(
-            t_Myr_vals >= lo, t_Myr_vals < hi
-        )
-        if time_idx is None:
-            idx = w_temp
-        else:
-            tmp = np.zeros(shape=flux_data['t_Myr'].shape, dtype=np.bool_)
-            tmp[time_idx]=True
-            idx = np.logical_and(tmp, w_temp)
-    print(np.average(t_Myr_vals[idx]), target_t_Myr, idx.sum(), lo, hi)
-
-    units = flux_data[quan].units
-    return unyt.unyt_array(
-        np.average(flux_data[quan][idx], axis=0),
-        units = units
-    )
-
-
 def _averaged_flux_properties(
-    target_t_Myr, quan, flux_data, duration_Myr,
-    time_idx = None,
-    kind = None,
-):
+    target_t_Myr: float,
+    quan: str,
+    flux_data: FluxData | dict[str, unyt.unyt_array],
+    duration_Myr: float,
+    time_idx: Any = None,
+    kind: str = None,
+) -> unyt.unyt_array:
+    """
+    Computes the time-averaged flux properties
+
+    Parameters
+    ----------
+    target_t_Myr
+        Specifies the time (in Myr) when we want to know the flux
+    quan: {"density", "momentum", "energy"}
+        Specifies the quantity that we are considering.
+    flux_data
+        The flux data to use in the calculation. This can either be a
+        ``FluxData`` instance (which directly stores measured data).
+        Alternatively, this can be a ``dict`` (that holds somewhat
+        manipulated data). In this case, we use ``flux_data[quan]``
+    duration_Myr
+        Specifies the duration of the average. A value of 0 uses the
+        instantaneous value.
+    time_idx
+        An optional argument that can be used to only consider measurements
+        from certain times.
+    kind {"outflow", "inflow", "net"}, optional
+        This must be specified when ``flux_data`` is a ``FluxData`` instance
+        to indicate the kind of flux data to use. Otherwise, this must be
+        ``None`` (the default).
+
+    Returns
+    -------
+    unyt.unyt_array
+        This holds the computed value. Recall that the input flux data is
+        always an array with at least 1 dimension (corresponding to
+        measurement time). The result is an array with one fewer dimensions. 
+    """
 
     if isinstance(flux_data, FluxData):
         assert kind is not None
@@ -260,6 +179,7 @@ def _averaged_flux_properties(
     else:
         raise RuntimeError()
 
+    assert duration_Myr >= 0
     # time runs along axis 0 of flux_vals
     if duration_Myr == 0:
         assert time_idx is None
@@ -286,7 +206,13 @@ def _averaged_flux_properties(
     )
 
 
-def _coerce_units(a, units=None):
+def _coerce_units(a, units=None) -> unyt.unyt_array:
+    """
+    Coerce a to unyt.unyt_quantity
+
+    Importantly, this also replaces code_length with kpc (which is accurate
+    for cholla simulations)
+    """
     view, myunits = a, units
     if units is None:
         assert isinstance(a, unyt.unyt_array)
@@ -299,85 +225,90 @@ def _coerce_units(a, units=None):
         return unyt.unyt_array(view, myunits)
     return a
 
-def _get_level_vals(flux_data):
+def _get_level_vals(flux_data) -> unyt.unyt_array:
+    """
+    Returns the level values of flux_data with appropriate units
+    """
     return _coerce_units(
         flux_data.level_bins.all_centers,
         flux_data.level_bins.units
     )
 
-def _get_ref_fluxes(calculator, flux_data, flux_flavor):
-    level_vals = _get_level_vals(flux_data)
-
-    if flux_flavor == 'r':
-        openning_angle = np.deg2rad(30.0)
-        out = calculator.r_flux(level_vals, openning_angle)
-    elif flux_flavor == 'z':
-        rcyl = np.ones_like(level_vals.ndview) * unyt.unyt_quantity(
-            1.2*np.sqrt(flux_data.other_selection_bounds.max()), 'kpc'
-        )
-        out = calculator.z_flux(rcyl)
-    else:
-        raise RuntimeError()
-    out['t_Myr'] = calculator.t_Myr
-    return out
-
-def _plot_grid(target_t_Myr, ax_arr, calculator, flux_data, flux_flavor):
-    duration_Myr = 4.0
-
-    ref_fluxes = _get_ref_fluxes(
-        _RefFlux_calculators['708cube_GasStaticG-1Einj_restart-TIcool'],
-        r_fluxes['708cube_GasStaticG-1Einj_restart-TIcool'],
-        flux_flavor
-    )
-
-    Tidx_color_pairs = [(0, 'C0'),
-                        (1, 'C2'),
-                        (2, 'C3')]
-
-    level_vals = _get_level_vals(flux_data)
-
-    for i, (quan, conf) in enumerate(_FUNDAMENTAL_QUAN_DESCR_MAP.items()):
-        
-        ref_avg = _averaged_flux_properties(
-            target_t_Myr, quan, ref_fluxes, duration_Myr,
-            time_idx = None,
-            kind = None,
-            flux_kind = None,
-        )
-        ax_arr[i].set_ylabel(r'$\eta_{' + conf.var_latex + r'}$')
-
-        _actual_avg = _averaged_flux_properties(
-            target_t_Myr, quan, flux_data, duration_Myr,
-            time_idx = None,
-            kind = 'net',
-            flux_kind = None,
-        )
-        if flux_flavor == 'r':
-            actual_avg = _actual_avg[...,0]
-        else:
-            actual_avg = _actual_avg[...,-1]
-        #print(actual_avg.shape)
-
-        for Tidx, color in Tidx_color_pairs:
-            ratio = actual_avg[:, Tidx]/ref_avg
-            ax_arr[i].plot(level_vals, ratio, color = color)
-
-def _test():
-    fig,ax_arr = plt.subplots(3,2, figsize = (8,12), sharex=True, sharey='row')
-    target_t_Myr = 110.0
-    _plot_grid(
-        target_t_Myr, ax_arr[:, 0],
-        _RefFlux_calculators['708cube_GasStaticG-1Einj_restart-TIcool'],
-        r_fluxes['708cube_GasStaticG-1Einj_restart-TIcool'],
-        'r'
-    )
-
-    _plot_grid(
-        target_t_Myr, ax_arr[:, 1],
-        _RefFlux_calculators['708cube_GasStaticG-2Einj_restart-TIcool'],
-        r_fluxes['708cube_GasStaticG-2Einj_restart-TIcool'],
-        'r'
-    )
+# all of the following is currently unused:
+#
+# def _get_ref_fluxes(calculator, flux_data, flux_flavor):
+#     level_vals = _get_level_vals(flux_data)
+# 
+#     if flux_flavor == 'r':
+#         openning_angle = np.deg2rad(30.0)
+#         out = calculator.r_flux(level_vals, openning_angle)
+#     elif flux_flavor == 'z':
+#         rcyl = np.ones_like(level_vals.ndview) * unyt.unyt_quantity(
+#             1.2*np.sqrt(flux_data.other_selection_bounds.max()), 'kpc'
+#         )
+#         out = calculator.z_flux(rcyl)
+#     else:
+#         raise RuntimeError()
+#     out['t_Myr'] = calculator.t_Myr
+#     return out
+# 
+# def _plot_grid(target_t_Myr, ax_arr, calculator, flux_data, flux_flavor):
+#     duration_Myr = 4.0
+# 
+#     ref_fluxes = _get_ref_fluxes(
+#         _RefFlux_calculators['708cube_GasStaticG-1Einj_restart-TIcool'],
+#         r_fluxes['708cube_GasStaticG-1Einj_restart-TIcool'],
+#         flux_flavor
+#     )
+# 
+#     Tidx_color_pairs = [(0, 'C0'),
+#                         (1, 'C2'),
+#                         (2, 'C3')]
+# 
+#     level_vals = _get_level_vals(flux_data)
+# 
+#     for i, (quan, conf) in enumerate(_FUNDAMENTAL_QUAN_DESCR_MAP.items()):
+#         
+#         ref_avg = _averaged_flux_properties(
+#             target_t_Myr, quan, ref_fluxes, duration_Myr,
+#             time_idx = None,
+#             kind = None,
+#             flux_kind = None,
+#         )
+#         ax_arr[i].set_ylabel(r'$\eta_{' + conf.var_latex + r'}$')
+# 
+#         _actual_avg = _averaged_flux_properties(
+#             target_t_Myr, quan, flux_data, duration_Myr,
+#             time_idx = None,
+#             kind = 'net',
+#             flux_kind = None,
+#         )
+#         if flux_flavor == 'r':
+#             actual_avg = _actual_avg[...,0]
+#         else:
+#             actual_avg = _actual_avg[...,-1]
+#         #print(actual_avg.shape)
+# 
+#         for Tidx, color in Tidx_color_pairs:
+#             ratio = actual_avg[:, Tidx]/ref_avg
+#             ax_arr[i].plot(level_vals, ratio, color = color)
+# 
+# def _test():
+#     fig,ax_arr = plt.subplots(3,2, figsize = (8,12), sharex=True, sharey='row')
+#     target_t_Myr = 110.0
+#     _plot_grid(
+#         target_t_Myr, ax_arr[:, 0],
+#         _RefFlux_calculators['708cube_GasStaticG-1Einj_restart-TIcool'],
+#         r_fluxes['708cube_GasStaticG-1Einj_restart-TIcool'],
+#         'r'
+#     )
+# 
+#     _plot_grid(
+#         target_t_Myr, ax_arr[:, 1],
+#         _RefFlux_calculators['708cube_GasStaticG-2Einj_restart-TIcool'],
+#         r_fluxes['708cube_GasStaticG-2Einj_restart-TIcool'],
+#         'r'
+#     )
 
 class StandardFluxLabelInfo(NamedTuple):
     # the order reflects the axis order
@@ -387,7 +318,14 @@ class StandardFluxLabelInfo(NamedTuple):
     selection_labels: list[str]
 
 
-def _standard_flux_labels(flux_data):
+def _standard_flux_labels(flux_data: FluxData) -> StandardFluxLabelInfo:
+    """
+    returns a named tuple, ``out``, where ``out[i]`` holds the appropriate
+    label for the ``i``th axis of the flux data
+
+    This is very convenient for plotting
+    """
+
     assert flux_data.other_selection_bounds.ndim == 2
     assert flux_data.other_selection_bounds.shape[1] == 2
 
@@ -431,8 +369,12 @@ def _standard_flux_labels(flux_data):
     )
 
 
-def _get_surface_area(flux_data):
-    # 
+def _get_surface_area(flux_data: FluxData) -> unyt.unyt_array:
+    """
+    Returns an array of surface areas that match the shape of fluxes in `flux_data` if
+    you are only considering a single time (or alternatively if you already averaged
+    over time
+    """
     level_vals = _get_level_vals(flux_data)
     assert flux_data.other_selection_bounds.ndim == 2
     len_other_selection_quan = flux_data.other_selection_bounds.shape[0]
@@ -476,12 +418,64 @@ def _get_surface_area(flux_data):
 
 
 def plot_flux_profile(
-    ax,
-    flux_data, quan, selection_idx, target_t_Myr, kind, duration_Myr=0,
-    Tidx_color_pairs=[(0, 'C0'), (1, 'C2'), (2, 'C3')],
-    ref_calculator=None, show_flux=None, time_idx=None, units=None,
-    plot_kw=None
+    ax: matplotlib.axes.Axes,
+    flux_data: FluxData,
+    quan: str,
+    selection_idx: int,
+    target_t_Myr: float,
+    kind: str,
+    duration_Myr=0,
+    Tidx_color_pairs: list[tuple[int,str]] = [(0, 'C0'), (1, 'C2'), (2, 'C3')],
+    ref_calculator: RefFluxCalculator | None =None,
+    show_flux: bool|None = None,
+    time_idx: Any =None,
+    units: str|None = None,
+    plot_kw: dict|None = None
 ):
+    """
+    Plots the specified flux data as a function of the appropriate "level values"
+
+    For radial fluxes, fluxes are plotted against spherical radius. For z-fluxes,
+    data is plotted against the displacement above the midplane.
+
+    Parameters
+    ----------
+    ax
+        A matplotlib Axes object to use for plotting the data.
+    flux_data
+        The data of interest is loaded from here
+    quan: {"density", "momentum", "energy"}
+        Specifies the quantity that we are considering.
+    selection_idx
+        The integer index of the selection quantity to consider. For radial
+        flux data this corresponds to a choice in openning angle. For zfluxes
+        this corresponds to a choice in cylindrical radius.
+    target_t_Myr
+        Specifies the time (in Myr) when we want to know the flux
+    kind: {"outflow", "inflow", "net"}, optional
+        This must be specified when ``flux_data`` is a ``FluxData`` instance
+        to indicate the kind of flux data to use. Otherwise, this must be
+        ``None`` (the default).
+    duration_Myr
+        Specifies the duration of the average. A value of 0 uses the
+        instantaneous value.
+    Tidx_color_pairs
+        Specifies the colors to use for different temperature bins and how to
+        color them.
+    ref_calculator
+        Optionally specifies a reference flux calculator. When provided, we
+        plot loading factors.
+    show_flux
+        This should only be specified when ``ref_calculator`` is None. In this
+        case, it accepts a bool to determine whether fluxes are plotted or
+        global time derivatives are plotted.
+    time_idx
+        An optional argument that can be used to only consider measurements
+        from certain times (this is relevant for averaging).
+    plot_kw
+        Can optionally specify a dictionary of extra kwargs to forward onto
+        ``ax.plot``
+    """
     plot_kw = {} if plot_kw is None else plot_kw
 
     conf = _FUNDAMENTAL_QUAN_DESCR_MAP[quan]
@@ -532,6 +526,9 @@ def plot_flux_profile(
 def generate_comparisons(shorthand_simname_pairs, fluxes, target_t_Myr,
                          duration_Myr, selection_idx, ref_calculators=None,
                          show_flux=None):
+    """
+    Generate plots comparing outflow measurements between simulations
+    """
     kind_ls_pairs = [('net', '-'), ('outflow', '--'), ('inflow', '-.')]
     Tidx_color_pairs=[(0, 'C0'), (1, 'C2'), (2, 'C3')]
 
@@ -579,6 +576,27 @@ def mkdir_and_savefig(path,exist_ok=True,**kwargs):
         os.makedirs(os.path.dirname(path), exist_ok=exist_ok)
     plt.savefig(path, **kwargs)
 
+def _build_RefFlux_calculators(
+    sne_datasets: dict[str, pd.DataFrame]
+) -> dict[str, RefFluxCalculator]:
+    """Construct a RefFluxCalculator for each SNe_dataset
+    """
+
+    def calc_SN_Einj(sim_name):
+        # determine energy injected by a SN from the simulation name
+        if '1Einj' in sim_name:
+            return unyt.unyt_quantity(1e51, 'erg')
+        elif '2Einj' in sim_name:
+            return unyt.unyt_quantity(2e51, 'erg')
+        else:
+            raise RuntimeError()
+    
+    return {
+        sim_name: RefFluxCalculator(
+            sn_dataset=sn_dataset, use_lo=True, sn_e_inject=calc_SN_Einj(sim_name)
+        ) for sim_name, sn_dataset in sne_datasets.items()
+    }
+
 if __name__ == '__main__':
 
     _FIGDIR = os.path.join(os.path.dirname(__file__), "..", "figures", "fluxes")
@@ -589,13 +607,12 @@ if __name__ == '__main__':
         get_intermediate_data_registry().keys()
     ))
 
+    # construct reference-flux calculators from the supernova rate datasets
+    # stored from each simulation
     _SNe_datasets = {name : load_SNe_dataset(name) for name in sim_names}
+    _RefFlux_calculators = _build_RefFlux_calculators(_SNe_datasets)
 
-    _RefFlux_calculators = {
-        sim_name : RefFluxCalculator(sim_name, SNe_rates, use_lo=True)
-        for sim_name, SNe_rates in _SNe_datasets.items()
-    }
-
+    # load the measured radial fluxes and the measured z fluxes
     r_fluxes = {
         sim_name : load_flux_data(sim_name, inner_dir="r_fluxes")
         for sim_name in sim_names
@@ -605,6 +622,7 @@ if __name__ == '__main__':
         for sim_name in sim_names
     }
 
+    # now we do a bunch of plotting of various combinations of quantities
     for my_dur, my_target_t_Myr in [
         (10, 115), (10, 125), (10, 135),
         (20, 115), (20, 125), (20, 135),

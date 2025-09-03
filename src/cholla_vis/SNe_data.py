@@ -3,10 +3,11 @@
 import os
 
 import pandas as pd
-
 from .registry import _get_processed_data_dir
 
-def load_SNe_dataset(sim_name, *, data_dir_prefix=None):
+type SNeData = pd.DataFrame
+
+def load_SNe_dataset(sim_name, *, data_dir_prefix=None) -> SNeData:
 
     if data_dir_prefix is None:
         data_dir_prefix = _get_processed_data_dir()
