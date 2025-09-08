@@ -1,3 +1,6 @@
+"""
+Plot the scale-height and the average density
+"""
 
 import numpy as np
 import unyt
@@ -6,94 +9,118 @@ import matplotlib.pyplot as plt
 import matplotlib
 from matplotlib import cm
 from matplotlib import colors
-
-from collections import ChainMap
 from cycler import cycler
 
-
+import argparse
+from collections import ChainMap
+from enum import StrEnum
 import os
 from types import MappingProxyType
 
+from cholla_vis.conf import build_conf_parser, path_conf_from_cli
 from cholla_vis import profile_creator
-from cholla_vis import flux_process
+from cholla_vis.flux import flux_process
 from cholla_vis.registry import get_intermediate_data_registry
 
-
-def _broadcast_to_grid(axis_vals, axis_index, grid_shape):
-    reshaping_idx = tuple(
-        slice(None) if i == axis_index else np.newaxis
-        for i in range(len(grid_shape))
-    )
-    return np.broadcast_to(axis_vals[reshaping_idx], grid_shape)
-
-
-
-def plot_assorted(
-    ax,
-    prof,
-    data_name,
-    xaxis_name,
-    binT_index,
-    other_spatial_bin_index = None,
-    data_units = None,
-    **kwargs
-):
-    xfield, axis_index, otherax_index = flux_process._get_axis_props(prof, xaxis_name)
-
-    xvals = _broadcast_to_grid(prof.data[xfield], axis_index, prof.data.shape)
-    yvals = prof.data[data_name]
-
-    if data_units is not None:
-        yvals = yvals.to(data_units)
-
-    assert 0 <= binT_index < 4
-    idx = [slice(None), slice(None), binT_index]
-    if other_spatial_bin_index is not None:
-        idx[otherax_index] = other_spatial_bin_index
-    idx = tuple(idx)
-    return ax.plot(xvals[idx], yvals[idx], **kwargs)
+# none of the following commented out stuff is used
+# def _broadcast_to_grid(axis_vals, axis_index, grid_shape):
+#     reshaping_idx = tuple(
+#         slice(None) if i == axis_index else np.newaxis
+#         for i in range(len(grid_shape))
+#     )
+#     return np.broadcast_to(axis_vals[reshaping_idx], grid_shape)
+# 
+# def plot_assorted(
+#     ax,
+#     prof,
+#     data_name,
+#     xaxis_name,
+#     binT_index,
+#     other_spatial_bin_index = None,
+#     data_units = None,
+#     **kwargs
+# ):
+#     xfield, axis_index, otherax_index = flux_process._get_axis_props(prof, xaxis_name)
+# 
+#     xvals = _broadcast_to_grid(prof.data[xfield], axis_index, prof.data.shape)
+#     yvals = prof.data[data_name]
+# 
+#     if data_units is not None:
+#         yvals = yvals.to(data_units)
+# 
+#     assert 0 <= binT_index < 4
+#     idx = [slice(None), slice(None), binT_index]
+#     if other_spatial_bin_index is not None:
+#         idx[otherax_index] = other_spatial_bin_index
+#     idx = tuple(idx)
+#     return ax.plot(xvals[idx], yvals[idx], **kwargs)
 
 
+# I can't remember what the following was originally used for
 
-def get_cylindrical_radius_cmap():
-    np.unique(prof.data['data','cylindrical_radius'])
-
-class AxisFieldProps:
-    def __init__(self, prof, name, label):
-        field, _, _ = flux_process._get_axis_props(prof, name)
-        self.name = name
-        self.field = field
-        self.label = label
-        vals = prof.data[field[0], field[1]].ndview
-        norm = colors.Normalize(vals.min(), vals.max())
-        cmap = matplotlib.colormaps['magma']
-        self.mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-        self.pairs = [
-            (i, cmap(norm(val))) for i, val in enumerate(vals)
-        ]
-
-def _define_known_axis_props(prof):
-    props = []
-    for field in [prof.x_field, prof.y_field]:
-        if field[1] == 'cylindrical_radius':
-            prop = AxisFieldProps(
-                prof, field[1], r'$r_{\rm cyl}\ [{\rm kpc}]$'
-            )
-        elif field[1] == 'absz':
-            prop = AxisFieldProps(prof, field[1], r'$|z|\ [{\rm kpc}]$')
-        elif field[1] == 'spherical_radius':
-            prop = AxisFieldProps(
-                prof, field[1], r'$r_{\rm sph}\ [{\rm kpc}]$'
-            )
-        else:
-            raise RuntimeError(field)
-        props.append(prop)
-    return props
+# def _show_scale_height(
+#     prof3D,
+#     rebin_cylindrical_radius_bins = False,
+#     downsample_factor=3,
+#     merge_temperature_bins = False
+# ):
+#     tmp = _extract_data_from_prof(
+#         prof3D, 
+#         rebin_cylindrical_radius_bins,
+#         downsample_factor=downsample_factor,
+#         merge_temperature_bins=merge_temperature_bins,
+#         kind = 'scale_height'
+#     )
+#     fig,ax = plt.subplots(1,1)
+#     if merge_temperature_bins:
+#         zest, rbins = tmp
+#         ax.stairs(zest.to('kpc').v, rbins.to('kpc').v)
+#     else:
+#         zest, rbins, T_bins = tmp
+#         for i, label in enumerate(profile_creator._standard_T_binnames()):
+#             ax.stairs(zest[:,i].to('kpc').v, rbins.to('kpc').v,
+#                       label = label)
+#     ax.legend()
+#     ax.set_yscale('log')
+#     ax.set_ylabel(r'$\hat{z}_H$ (kpc)')
+#     ax.set_xlabel(r'$r_{\rm cyl}$ (kpc)')
+#     ax.set_xlim(0.0, ax.get_xlim()[1])
+#     ax.axhline(0.005, ls = '--', label = 'resolution')
+# 
+# class AxisFieldProps:
+#     def __init__(self, prof, name, label):
+#         field, _, _ = flux_process._get_axis_props(prof, name)
+#         self.name = name
+#         self.field = field
+#         self.label = label
+#         vals = prof.data[field[0], field[1]].ndview
+#         norm = colors.Normalize(vals.min(), vals.max())
+#         cmap = matplotlib.colormaps['magma']
+#         self.mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+#         self.pairs = [
+#             (i, cmap(norm(val))) for i, val in enumerate(vals)
+#         ]
+# 
+# def _define_known_axis_props(prof):
+#     props = []
+#     for field in [prof.x_field, prof.y_field]:
+#         if field[1] == 'cylindrical_radius':
+#             prop = AxisFieldProps(
+#                 prof, field[1], r'$r_{\rm cyl}\ [{\rm kpc}]$'
+#             )
+#         elif field[1] == 'absz':
+#             prop = AxisFieldProps(prof, field[1], r'$|z|\ [{\rm kpc}]$')
+#         elif field[1] == 'spherical_radius':
+#             prop = AxisFieldProps(
+#                 prof, field[1], r'$r_{\rm sph}\ [{\rm kpc}]$'
+#             )
+#         else:
+#             raise RuntimeError(field)
+#         props.append(prop)
+#     return props
         
-def _use_data_prefix(prof):
-    return any(fkind == "data" for fkind, _ in prof.field_list)
-
 def _dirty_rebin_slices(data_ndim, bin_ax, old_bins, new_bins):
+    # a quick and dirty function for rebinning a quantity (this is imperfect)
     assert data_ndim > bin_ax
     old_locs = 0.5*(old_bins[:-1] + old_bins[1:])
 
@@ -143,14 +170,58 @@ def _dirty_rebin(data, bin_ax, old_bins, new_bins):
 def _use_data_prefix(prof):
     return any(fkind == "data" for fkind, _ in prof.field_list)
 
+class DataKind(StrEnum):
+    """
+    Specifies the kinds of data that can be derived from a scale-height phase dataset
+    """
+    SCALE_HEIGHT="scale_height"
+    AVG_DENSITY="avg_density"
+    VCIRC="vcirc"
+
 def _extract_data_from_prof(
     prof3D,
-    kind,
-    rebin_cylindrical_radius_bins=False,
-    downsample_factor=3,
-    merge_temperature_bins = False,
-    stop_absz_bin_edge_index = None,
+    kind: DataKind,
+    rebin_cylindrical_radius_bins:bool=False,
+    downsample_factor:int=3,
+    merge_temperature_bins:bool = False,
+    stop_absz_bin_edge_index:int | None = None,
 ):
+    """
+    Extracts a derived quantity from a "scale-height" profile
+
+    As I recall, the scale-heigh profile holds multiple quantities and are binned
+    - along cylindrical radius
+    - along absz
+    - with respect to the temperature bins
+
+    This function always performs an operation along the absz axis. It can
+    optionally perform an operation along the temperature bins axis.
+
+    Parameters
+    ----------
+    prof3D
+        A single yt 3D profile
+    kind
+        The quantity to derive from the profile
+    rebin_cylindrical_radius:
+        When True, we downsample the cylindrical radius bins
+    downsample_factor
+        Specifies how to downsample the cylindrical radius bins
+    merge_temperature_bins
+        When False, we preserve the various temperature bins. When True, the
+        temperature bins are all merged together (i.e. there is 1 bin of all
+        temperatures)
+    stop_absz_bin_edge_index
+        When specified, all `indices >= stop_absz_bin_edge_index` are omitted
+        from the calculation.
+    """
+
+
+    # this if-statement exists to handle the case where we imediately call this
+    # function after creating the 3D profile or if we loaded a 3D profile from disk
+    #
+    # if you ask me, the fact that we need different code for each case is a poor
+    # design decision in yt
     if _use_data_prefix(prof3D):
         findex, fgas = "data", "data"
         profdata = prof3D.data
@@ -170,21 +241,6 @@ def _extract_data_from_prof(
         # if it is 0, then we aren't selecting any bins
         assert stop_absz_bin_edge_index > 0
         idx = (slice(None), slice(0, stop_absz_bin_edge_index), ...)
-    #    _max_absz = max_absz.ndview
-    #    assert np.all(_max_absz > 0)
-    #    assert np.ndim(_max_absz) == 0
-    #    # we check y_bins[1] (rather than y_bins[0]) to ensure that an entire
-    #    # bin (i.e. both edges) lies below max_absz
-    #    assert max_absz > y_bins[1]
-    #    _bin_edges = y_bins.to(max_absz.units).ndview
-    #    # find the index of the first edge greater than max_absz. Based on the
-    #    # above assertion, this is 2 or larger
-    #    stop_edge_index_p1 = np.searchsorted(
-    #        _bin_edges, _max_absz, side='right'
-    #    )
-    #    assert _bin_edges[stop_edge_index_p1-1] <= _max_absz
-    #    # we don't want to include a bin that only partially overlaps
-    #    idx = (slice(None), slice(0, stop_edge_index_p1-1), ...)
 
     if kind == "scale_height":
         # this is an estimate
@@ -239,34 +295,16 @@ def _extract_data_from_prof(
     else:
         return out, x_bins, z_bins
 
-def _show_scale_height(prof3D, rebin_cylindrical_radius_bins = False, downsample_factor=3,
-                       merge_temperature_bins = False):
-    tmp = _extract_data_from_prof(
-        prof3D, 
-        rebin_cylindrical_radius_bins,
-        downsample_factor=downsample_factor,
-        merge_temperature_bins=merge_temperature_bins,
-        kind = 'scale_height'
-    )
-    fig,ax = plt.subplots(1,1)
-    if merge_temperature_bins:
-        zest, rbins = tmp
-        ax.stairs(zest.to('kpc').v, rbins.to('kpc').v)
-    else:
-        zest, rbins, T_bins = tmp
-        for i, label in enumerate(profile_creator._standard_T_binnames()):
-            ax.stairs(zest[:,i].to('kpc').v, rbins.to('kpc').v,
-                      label = label)
-    ax.legend()
-    ax.set_yscale('log')
-    ax.set_ylabel(r'$\hat{z}_H$ (kpc)')
-    ax.set_xlabel(r'$r_{\rm cyl}$ (kpc)')
-    ax.set_xlim(0.0, ax.get_xlim()[1])
-    ax.axhline(0.005, ls = '--', label = 'resolution')
 
-def collect_data(sim_name, downsample_factor=3, kind = 'scale_height',
+def collect_data(sim_name, path_conf, downsample_factor=3, kind = 'scale_height',
                  merge_temperature_bins = False):
-    datasets = flux_process.get_data_names(sim_name, 'scale-height')
+    """
+    This function collects the specified kinds of data from inidvidual scale-height
+    phase-profile datasets.
+
+    """
+    datasets = flux_process.get_data_names(
+        sim_name, 'scale-height', path_conf=path_conf)
     radial_bins, T_bins = None, None
     times_Myr = []
     data = []
@@ -503,37 +541,35 @@ def plot_all_avg_densities(avg_density_data, nradial_bins,
     fig.tight_layout()
     return fig, ax_arr
 
+parser = argparse.ArgumentParser(
+    description=__doc__, parents=[build_conf_parser()] 
+)
 
 if __name__ == '__main__':
-    #datasets = flux_process.get_data_names('708cube_GasStaticG-2Einj_restart-TIcool', 'scale-height')
-    #prof = yt.load(datasets[1200], hint = "YTProfileDataset")
-    #_show_scale_height(prof, True, 12, merge_temperature_bins = True)
-    #plt.show()
+    args = parser.parse_args()
+    path_conf = path_conf_from_cli(args)
 
     _FIGDIR = os.path.join(os.path.dirname(__file__), "..", "figures")
     yt.set_log_level(40)
  
-    for kind in ['scale_height', 'avg_density']:
+    for kind in [DataKind.SCALE_HEIGHT, DataKind.AVG_DENSITY]:
         #data_downsample3 = {}
         data_downsample12 = {}
         data_downsample12_allT = {}
  
-        sim_names = get_intermediate_data_registry().keys()
+        sim_names = get_intermediate_data_registry(path_conf=path_conf).keys()
         for sim_name in sim_names:
             print()
             print(sim_name)
-            #data_downsample3[sim_name] = collect_scale_height(
-            #    sim_name, downsample_factor=3
-            #)
             data_downsample12[sim_name] = collect_data(
-                sim_name, kind = kind, downsample_factor=12
+                sim_name, path_conf=path_conf, kind = kind, downsample_factor=12
             )
             data_downsample12_allT[sim_name] = collect_data(
-                sim_name, kind = kind, downsample_factor=12,
+                sim_name, path_conf=path_conf, kind = kind, downsample_factor=12,
                 merge_temperature_bins = True
             )
  
-        if kind == "scale_height":
+        if kind == DataKind.SCALE_HEIGHT:
             fig, ax_arr = plot_all_scale_heights(
                 data_downsample12,
                 nradial_bins=1,

@@ -7,10 +7,14 @@ from dataclasses import dataclass
 import os
 from typing import NamedTuple
 
-from .registry import get_intermediate_data_registry
+from ..registry import get_intermediate_data_registry
+from ..conf import PathConf
 
-def get_data_names(sim_name, data_name):
-    path = get_intermediate_data_registry()[sim_name]
+def get_data_names(sim_name, data_name, path_conf: PathConf):
+    """
+    Get the names of all available intermediate data products
+    """
+    path = get_intermediate_data_registry(path_conf=path_conf)[sim_name]
     l = []
     with os.scandir(os.path.join(path, data_name)) as it:
         for entry in filter(lambda e: e.is_file(), it):

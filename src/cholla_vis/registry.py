@@ -1,23 +1,14 @@
 from collections.abc import Mapping
 from functools import cache
 import os
-import platform
 from types import MappingProxyType
 
-# TODO: WE REALLY NEED TO WORK ON HOW THIS IS ORGANIZED
+from .conf import PathConf
 
-if 'oscar.local' == platform.node():
-    _SIMDATA_PREFIX = None
-    _INTERMED_PREFIX = '/Users/mabruzzo/Dropbox/research/mw-wind/data/analysis-data/'
-    _PROCESSED_PREFIX = '/Users/mabruzzo/Dropbox/research/mw-wind/data/processed'
-else:
-    _SIMDATA_PREFIX = '/ix/eschneider/mabruzzo/hydro/galactic-center/'
-    _INTERMED_PREFIX = '/ix/eschneider/mabruzzo/hydro/galactic-center/analysis-data/'
-    _PROCESSED_PREFIX = None # <--- TODO: add me!
 
 @cache
 def get_simdata_registry(
-    name_prefix: str = '708cube_', dir_path: os.PathLike | None = None
+    name_prefix: str = '708cube_', *, path_conf: PathConf
 ) -> Mapping[str, os.PathLike]:
     """Returns a Mapping that maps simulation names to paths (to the directories that
     actually hold the simulation)"""
@@ -25,13 +16,15 @@ def get_simdata_registry(
     def is_simdir(e):
         return e.is_dir() and e.name.startswith(name_prefix)
 
-    dir_path = _SIMDATA_PREFIX if dir_path is None else dir_path
+    if path_conf.simdata_prefix is None:
+        return {}
+
     out = {}
-    with os.scandir(dir_path) as it:
+    with os.scandir(path_conf.simdata_prefix) as it:
         for entry in filter(is_simdir, it):
             out[entry.name] = entry.path
 
-    return MappingProxyType(_SIMDATA_REGISTRY)
+    return MappingProxyType(out)
 
 
 # TODO: we should rearrange probably the directory layout of the intermediate products
@@ -43,7 +36,7 @@ def get_simdata_registry(
 #           are the top level
 
 @cache
-def get_intermediate_data_registry() -> Mapping[str, os.PathLike]:
+def get_intermediate_data_registry(path_conf: PathConf) -> Mapping[str, os.PathLike]:
     """Returns a Mapping that maps simulation names to directory paths where
     intermediate data-products are stored
 
@@ -68,14 +61,14 @@ def get_intermediate_data_registry() -> Mapping[str, os.PathLike]:
             └── ...
     """
     out = {}
-    with os.scandir(_INTERMED_PREFIX) as it:
+    with os.scandir(path_conf.intermediate_data) as it:
         for entry in filter(lambda e: e.is_dir(), it):
             out[entry.name] = entry.path
     return MappingProxyType(out)
 
 
 # we probably want to rethink this function
-def _get_processed_data_dir() -> os.PathLike | None:
+def _get_processed_data_dir(path_conf: PathConf) -> os.PathLike | None:
     """Returns the directory  that maps simulation names to directory paths where
     processed data-products are stored
 
@@ -103,5 +96,5 @@ def _get_processed_data_dir() -> os.PathLike | None:
             ├── ...
             └── ...
     """
-    return _PROCESSED_PREFIX
+    return path_conf.processed_data
 

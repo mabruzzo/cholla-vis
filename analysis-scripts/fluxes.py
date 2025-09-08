@@ -1,3 +1,8 @@
+"""
+Plot some flux data
+"""
+
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -6,12 +11,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+import argparse
 from dataclasses import dataclass
-import functools
 import os
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+from cholla_vis.conf import build_conf_parser, path_conf_from_cli
 from cholla_vis.registry import get_intermediate_data_registry
 from cholla_vis.SNe_data import load_SNe_dataset
 from cholla_vis.flux.fluxes import load_flux_data, FluxData
@@ -597,28 +603,36 @@ def _build_RefFlux_calculators(
         ) for sim_name, sn_dataset in sne_datasets.items()
     }
 
+parser = argparse.ArgumentParser(
+    description=__doc__, parents=[build_conf_parser()]
+)
+
 if __name__ == '__main__':
+    args = parser.parse_args()
+    path_conf = path_conf_from_cli(args)
 
     _FIGDIR = os.path.join(os.path.dirname(__file__), "..", "figures", "fluxes")
 
     # load a list of simulation names
     sim_names = list(filter(
         lambda key: key!='708cube_GasStaticG-1Einj_restartDelay-TIcool',
-        get_intermediate_data_registry().keys()
+        get_intermediate_data_registry(path_conf=path_conf).keys()
     ))
 
     # construct reference-flux calculators from the supernova rate datasets
     # stored from each simulation
-    _SNe_datasets = {name : load_SNe_dataset(name) for name in sim_names}
+    _SNe_datasets = {
+        name : load_SNe_dataset(name, path_conf=path_conf) for name in sim_names
+    }
     _RefFlux_calculators = _build_RefFlux_calculators(_SNe_datasets)
 
     # load the measured radial fluxes and the measured z fluxes
     r_fluxes = {
-        sim_name : load_flux_data(sim_name, inner_dir="r_fluxes")
+        sim_name : load_flux_data(sim_name, path_conf, inner_dir="r_fluxes")
         for sim_name in sim_names
     }
     z_fluxes = {
-        sim_name : load_flux_data(sim_name, inner_dir="z_fluxes")
+        sim_name : load_flux_data(sim_name, path_conf, inner_dir="z_fluxes")
         for sim_name in sim_names
     }
 
@@ -644,6 +658,7 @@ if __name__ == '__main__':
         ax_arr[2,0].set_ylim(-0.001, 0.01)        
         mkdir_and_savefig(
             f'{_FIGDIR}/cmp_rflux/dur{my_dur}_{my_target_t_Myr}.png')
+        plt.close('all')
 
         _,ax_arr = generate_comparisons(
             fluxes=z_fluxes, selection_idx=4, **_my_kwarg
@@ -652,6 +667,7 @@ if __name__ == '__main__':
         ax_arr[2,0].set_ylim(-0.001, 0.01)        
         mkdir_and_savefig(
             f'{_FIGDIR}/cmp_zflux/dur{my_dur}_{my_target_t_Myr}.png')
+        plt.close('all')
 
         _,ax_arr = generate_comparisons(
             fluxes=z_fluxes, selection_idx=0, **_my_kwarg
@@ -684,6 +700,7 @@ if __name__ == '__main__':
         #ax_arr[2,0].set_ylim(-0.001, 0.01)        
         mkdir_and_savefig(
             f'{_FIGDIR}/deriv_cmp_rflux/dur{my_dur}_{my_target_t_Myr}.png')
+        plt.close('all')
 
         _,ax_arr = generate_comparisons(
             fluxes=z_fluxes, selection_idx=4, **_my_kwarg
@@ -692,6 +709,7 @@ if __name__ == '__main__':
         #ax_arr[2,0].set_ylim(-0.001, 0.05)
         mkdir_and_savefig(
             f'{_FIGDIR}/deriv_cmp_zflux/dur{my_dur}_{my_target_t_Myr}.png')
+        plt.close('all')
 
 
     for my_dur, my_target_t_Myr in [
@@ -715,6 +733,7 @@ if __name__ == '__main__':
         mkdir_and_savefig(
             f'{_FIGDIR}/fluxvals_cmp_rflux/dur{my_dur}_{my_target_t_Myr}.png'
         )
+        plt.close('all')
 
         _,ax_arr = generate_comparisons(
             fluxes=z_fluxes, selection_idx=4, **_my_kwarg
@@ -723,7 +742,7 @@ if __name__ == '__main__':
         #ax_arr[2,0].set_ylim(-0.001, 0.05)
         mkdir_and_savefig(
             f'{_FIGDIR}/fluxvals_cmp_zflux/dur{my_dur}_{my_target_t_Myr}.png')
-
+        plt.close('all')
 
     #print(_get_surface_area(z_fluxes['708cube_GasStaticG-1Einj']))
     #print(_standard_flux_labels(z_fluxes['708cube_GasStaticG-1Einj']))

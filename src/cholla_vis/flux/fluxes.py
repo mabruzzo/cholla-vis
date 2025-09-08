@@ -12,6 +12,7 @@ import numpy as np
 import h5py
 import unyt
 
+from ..conf import PathConf
 from ..registry import _get_processed_data_dir
 
 _MEASUREKIND_IDX_MAP = MappingProxyType(
@@ -187,18 +188,12 @@ class FluxData:
 
 def load_flux_data(
     sim_name: str,
-    *,
-    dirpath: os.PathLike | None = None,
-    inner_dir: os.PathLike | None = None
+    path_conf: PathConf,
+    inner_dir: os.PathLike,
 ) -> FluxData:
     """load in the precomputed flux data."""
 
-    if dirpath is None:
-        assert inner_dir is not None
-        path = os.path.join(_get_processed_data_dir(), inner_dir, sim_name) + ".h5"
-    else:
-        assert inner_dir is None
-        path = os.path.join(dirpath, sim_name) + ".h5"
+    path = os.path.join(_get_processed_data_dir(path_conf), inner_dir, sim_name) + ".h5"
 
     def _load_level_bins(h5_file, descr):
         """
