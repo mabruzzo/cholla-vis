@@ -70,6 +70,11 @@ Anyways, it may be more helpful to talk through figures and reference the script
 
 ## figures
 
+When calling the script, you should pass the `--conf <path/to/config.toml>`, where `<path/to/config.toml>` holds the path to a configuration file (that specifies the paths to the sim directory, the intermediate-data directory, and the processed-data directory.
+
+The **sample-conf-files** holds examples of what these configuration files might look like.
+You can directly use **./sample-conf-files/crc.toml** if you want to invoke the scripts on Pitt's CRC cluster.
+
 ### fluxes
 
 the **figures/fluxes** directory was all created by **analysis-scripts/fluxes.py**. These show outflow rates from various simulations.
