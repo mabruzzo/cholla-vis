@@ -1,0 +1,4 @@
+[path]
+simdata_prefix = "/ix/eschneider/projects/galactic-center/sims/"
+intermediate_data = "/ix/eschneider/projects/galactic-center/intermediate-data/"
+processed_data = "/ix/eschneider/projects/galactic-center/processed-data/"

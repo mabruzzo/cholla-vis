@@ -1,0 +1,5 @@
+[path]
+# simdata_prefix is the only one of these paths that is optional
+# simdata_prefix =
+intermediate_data = "/Users/mabruzzo/Dropbox/research/mw-wind/data/analysis-data/"
+processed_data = "/Users/mabruzzo/Dropbox/research/mw-wind/data/processed/"
