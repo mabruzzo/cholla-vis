@@ -66,11 +66,11 @@ At the time of running, 2 primary logic files are scripts in the analysis-script
 - Originally these scripts were developed in Notebooks and a while back I had started to migrate them over (from Notebooks). So I made sure I could get them to run as scripts. They are packed with a ridiculous amount of logic, and I've started to flesh things out, but we need a lot more clarifying comments.
 - The remaining analysis logic is still defined in Notebooks
 
-Anyways, it may be more helpful to talk through figures and reference the scripts that were used to generate the figures...
+## Describing Scripts By the Figures they make
 
-## figures
+For the most part, it's more helpful to talk through figures and reference the scripts that were used to generate them (but there are other useful tools as well)
 
-When calling the script, you should pass the `--conf <path/to/config.toml>`, where `<path/to/config.toml>` holds the path to a configuration file (that specifies the paths to the sim directory, the intermediate-data directory, and the processed-data directory.
+When calling theses script, you should pass the `--conf <path/to/config.toml>`, where `<path/to/config.toml>` holds the path to a configuration file (that specifies the paths to the sim directory, the intermediate-data directory, and the processed-data directory).
 
 The **sample-conf-files** holds examples of what these configuration files might look like.
 You can directly use **./sample-conf-files/crc.toml** if you want to invoke the scripts on Pitt's CRC cluster.
@@ -113,6 +113,74 @@ These plots were generated with the analysis-scripts/scale-height.py file.
 They show the scale-height and the average-density for all the simulations over time.
 
 **TODO(what is the height associated with the density?)**
+
+## Other Scripts
+
+The repository includes some other useful scripts.
+
+### Plotting Slices and Figures
+
+The `analysis-scripts/plot_2d_output.py` script generates images of slice-outputs and projection outputs that were previously written to disk by Cholla.
+This script works by using certain hard-coded plotting presets for slices and projections.
+
+You can see the available presets by invoking:
+
+```sh
+python <path/to/analysis-scripts/plot_2d_output.py> show-presets
+```
+
+To actually make a plot you would invoke something like:
+
+```sh
+python <path/to/analysis-scripts/plot_2d_output.py> plot \
+    --load-dir=./catfiles \
+    --save-dir=./my-image-test \
+    --no-distributed-load \
+    --kind=slice \
+    --snaps 150 \
+    --quan temperature, ndens, phat
+```
+
+On the CRC, I confirmed that the above command will work from within the
+   /ix/eschneider/projects/galactic-center/sims/708cube_GasStaticG-1Einj
+directory (it writes outputs to the `./my-image-test` directory)
+
+There are a few extra things to consider:
+- the `./catfiles` directory is a directory of output files to plot.
+  - In this case the, the files were previously concatenated (using scripts
+    provided by the main Cholla directory). Because they were concatenated, we need to
+    pass the `--no-distributed-load` flag
+  - in principle, we could also load distributed output files. In that case, you need
+    to pass the `--distributed-load` (and remove the `--no-distributed-load` flag)
+- `--kind` must specify `proj` or `slice`
+- `--quan` must specify one or more of the known presets
+- `--snaps` must specify the index of a single snapshot or a range of snapshots using
+  python slice-notation (e.g. `150:163:4` specifies `150`, `154`, `158`, `162`)
+
+You can also optionally pass `--ncores` to specify how to parallelize operations on a single CPU node.
+
+For more info, invoke 
+
+```sh
+python <path/to/analysis-scripts/plot_2d_output.py> plot --help
+```
+
+Unfortunately, the plotting presets are currently hardcoded (but that shouldn't be
+too hard to change)
+
+### Concatenation
+
+We provide a legacy concatenation script. The following snippet shows how you might
+launch it:
+
+```sh
+python <path/to/concat_snaps.py> \
+    --snaps <snap-range> \
+    --source-directory <path/to/unconcatenated> \
+    --output-directory <path/to/output-dir> \
+    --cholla-src-dir <path/to/cholla/repository> \
+    --proc-per-snap=12
+```
 
 ## TODO
 
