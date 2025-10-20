@@ -1,20 +1,18 @@
 # we need to unify this with galaxy_profile
+# could also use quite a lot more cleanup
 
-import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
-import os
-
 from functools import wraps,partial
+import os
+import textwrap
 from time import time
 
 import numpy as np
 import unyt
 import yt
 
-if __name__ == '__main__':
-    yt.enable_parallelism()
-
-from cholla_vis import galaxy_profile
+from . import galaxy_profile
 
 _TBIN_EDGES = [
     (0.0, None),
@@ -264,33 +262,113 @@ class IOConfig:
     fnames: list[str]
     outdir: str
 
-_FLUX_PROFILES = ('r_fluxes', 'r_fluxes_positive',
-                  'z_fluxes', 'z_fluxes_positive')
+@dataclass
+class ProfileDescriptor:
+    name: str
+    description: str
+    fn: Callable
 
-_CHOICES = _FLUX_PROFILES + ('scale-height', 'assorted')
 
-def main(profile_kind, ioconf, parallel=True):
 
-    def setup(ds): # do nothing
+def _mk_profile_descriptors() -> dict[str, ProfileDescriptor]:
+    obj_list = [
+        ProfileDescriptor(
+            name = "r_fluxes",
+            description = (
+                "Profile of fluxes parallel to spherical radius. Specifically the "
+                "profiles include cells for all velocities (i.e. net fluxes are "
+                "measured)."
+            ),
+            fn = partial(
+                flux_binned_props, radial=True, only_positive_vel=False
+            )
+        ),
+        ProfileDescriptor(
+            name = "z_fluxes",
+            description = (
+                "Profile of fluxes z-axis (positive values flow away from the "
+                "midplane). Specifically the profiles include cells for all velocities "
+                "(i.e. net fluxes are measured)."
+            ),
+            fn = partial(flux_binned_props, radial=False, only_positive_vel=False)
+        ),
+        ProfileDescriptor(
+            name = "r_fluxes_positive",
+            description = (
+                "Profile of fluxes parallel to spherical radius. Specifically the "
+                "profiles only include cells for which the velocity along this "
+                "direction is positive (i.e. only net fluxes are measured)."
+            ),
+            fn = partial(flux_binned_props, radial=True, only_positive_vel=True)
+        ),
+        ProfileDescriptor(
+            name = "z_fluxes_positive",
+            description = (
+                "Profile of fluxes z-axis (positive values flow away from the "
+                "midplane). Specifically the profiles only include cells for which the "
+                "velocity along this direction is positive (i.e. only net fluxes are "
+                "measured)."
+            ),
+            fn = partial(flux_binned_props, radial=False, only_positive_vel=True)
+        ),
+        ProfileDescriptor(
+            name = "scale-height",
+            description = "Profile of quantities related to scale-height.",
+            fn = fetch_props_scale_height
+        ),
+        ProfileDescriptor(
+            name = "assorted",
+            description = "Profile of assorted quantities.",
+            fn = assorted_binned_properties
+        )
+    ]
+
+    return dict((obj.name, obj) for obj in obj_list)
+
+_CHOICES = _mk_profile_descriptors()
+
+def _list_profile_choices() -> tuple[str, ...]:
+    return tuple(_CHOICES)
+
+def show_profile_choices():
+    for _, prof_descr in _CHOICES.items():
+        print('"', prof_descr.name, ':"', sep='')
+        print(*textwrap.wrap(
+            prof_descr.description,
+            width=79,
+            initial_indent="    ",
+            subsequent_indent="    ",
+            replace_whitespace=True,
+            fix_sentence_endings=False,
+            break_long_words=False,
+            drop_whitespace=False,
+            break_on_hyphens=False),
+            sep='\n'
+        )
+
+def create_profile(profile_kind, ioconf: IOConfig, parallel:bool =True):
+    """
+    Does most of the heavy lifting for creating a profile.
+
+    This was originally the main() function of a script. Maybe we
+    should do that again?
+    """
+
+    def setup(ds):
+        # this is a callback function that defines some derived fields
         galaxy_profile.try_add_absz(ds)
         galaxy_profile.try_add_extra_fields(ds)
         galaxy_profile.add_flux_fields(ds, radial=True)
         galaxy_profile.add_flux_fields(ds, radial=False)
-    print(f"parallel = {parallel}")
 
+    # construct the a DatasetSeries
+    print(f"preparing work with parallel = {parallel}")
     series = yt.DatasetSeries(ioconf.fnames,
                               parallel = parallel,
                               setup_function = setup)
-    if profile_kind in _FLUX_PROFILES:
-        fn = partial(
-            flux_binned_props,
-            radial=profile_kind.startswith('r_'),
-            only_positive_vel=profile_kind.endswith('_positive')
-        )
-    elif profile_kind == 'scale-height':
-        fn = fetch_props_scale_height
-    else:
-        fn = assorted_binned_properties
+    
+    # get the callback function that is actually used with a profile
+    fn = _CHOICES[profile_kind].fn
 
     dtypename = profile_kind
     dirname = os.path.join(ioconf.outdir, dtypename)
@@ -314,57 +392,3 @@ def main(profile_kind, ioconf, parallel=True):
     print("function is complete! Created: ")
     for fname in fnames:
         print("-> ", fname)
-
-_STEP = 10
-_CASE_DICT = {
-    '708cube_GasStaticG-1Einj_restart-TIcool' : range(850, 1485, _STEP),
-    #'708cube_GasStaticG-1Einj_restart-TIcool' : range(1000, 1485, 1),
-    '708cube_GasStaticG-1Einj' : range(800, 1334, _STEP),
-    '708cube_GasStaticG-1Einj_restartDelay-TIcool' : range(1300, 1461, _STEP),
-    '708cube_GasStaticG-2Einj_restart-TIcool' : range(1205, 1591, _STEP),
-    '708cube_GasStaticG-2Einj' : range(850, 1081, _STEP),
-}
-
-_SIM_CHOICES = list(_CASE_DICT.keys())
-
-def mk_testioconf(sim_name):
-    _SIMDIR = "/ix/eschneider/mabruzzo/hydro/galactic-center/"
-    _DATADIR = "/ix/eschneider/mabruzzo/hydro/galactic-center/analysis-data/"
-
-    snaps = _CASE_DICT[sim_name]
-
-    fnames = [
-        os.path.join(_SIMDIR, sim_name, 'raw', f"{snap}", f"{snap}.h5.0")
-        for snap in snaps
-    ]
-    return IOConfig(
-        fnames=fnames,
-        outdir=os.path.join(_DATADIR, sim_name)
-    )
-
-parser = argparse.ArgumentParser(prog='make_profile')
-parser.add_argument("--profile-kind", choices=_CHOICES)
-parser.add_argument("--sim", choices=_SIM_CHOICES, nargs='+')
-parser.add_argument(
-    "--parallel_snap", action = 'store', default = None, type = int,
-    help=(
-        "the number of snapshots that should be processed in parallel. A "
-        "value of 1 means that only 1 is processed at a time. The remaining "
-        "processors work together to process the data. The total number of "
-        "processors must be evenly divisible by this value."
-    )
-)
-
-if __name__ == '__main__':
-    args = parser.parse_args()
-
-    if args.parallel_snap is None:
-        parallel = True
-    else:
-        assert(args.parallel_snap>=1 and isinstance(args.parallel_snap,int))
-        parallel = args.parallel_snap
-
-    assert len(set(args.sim)) == len(args.sim)
-    
-    for sim_name in args.sim:
-        main(args.profile_kind, mk_testioconf(sim_name), parallel=parallel)
