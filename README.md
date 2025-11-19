@@ -182,6 +182,14 @@ python <path/to/concat_snaps.py> \
     --proc-per-snap=12
 ```
 
+### Parse SNe History
+
+We provide a script to generate the CSV file containing the SNe history for our simulations by parsing the logs produced while running the simulations.
+This script is called ``analysis-scripts/gen_SNe_tables.py``
+
+Use the ``--help`` argument to find out more.
+
+
 ## TODO
 
 I need to do a much better job documenting the origin of the input data
