@@ -6,6 +6,9 @@ A general utility for making profiles from Cholla snapshots
 from cholla_vis.profile_creator import (
     IOConfig, create_profile, _list_profile_choices, show_profile_choices
 )
+from cholla_vis.conf import (
+    PathConf, full_conf_from_cli, build_conf_parser
+)
 
 import argparse
 import os
@@ -14,7 +17,6 @@ import yt
 _STEP = 10
 _CASE_DICT = {
     '708cube_GasStaticG-1Einj_restart-TIcool' : range(850, 1485, _STEP),
-    #'708cube_GasStaticG-1Einj_restart-TIcool' : range(1000, 1485, 1),
     '708cube_GasStaticG-1Einj' : range(800, 1334, _STEP),
     '708cube_GasStaticG-1Einj_restartDelay-TIcool' : range(1300, 1461, _STEP),
     '708cube_GasStaticG-2Einj_restart-TIcool' : range(1205, 1591, _STEP),
@@ -33,23 +35,35 @@ def main_plot(args):
         parallel = args.parallel_snap
 
     assert len(set(args.sim)) == len(args.sim)
-    
-    for sim_name in args.sim:
-        create_profile(args.profile_kind, mk_testioconf(sim_name), parallel=parallel)
 
-def mk_testioconf(sim_name):
-    _SIMDIR = "/ix/eschneider/mabruzzo/hydro/galactic-center/"
-    _DATADIR = "/ix/eschneider/mabruzzo/hydro/galactic-center/analysis-data/"
+    full_conf = full_conf_from_cli(args=args)
+    simprop_conf = full_conf.simprop_conf
+
+    # perform a sanity-check that all simulations are valid
+    for sim_name in args.sim:
+        if sim_name not in simprop_conf.data:
+            raise RuntimeError(
+                f"{sim_name!r} is not a know simulation. Known names include: " +
+                ", ".join(simprop_conf.data.keys())
+            )
+
+    for sim_name in args.sim:
+        ioconf = mk_ioconf(sim_name=sim_name, path_conf=full_conf.path_conf)
+        create_profile(args.profile_kind, ioconf=ioconf, parallel=parallel)
+
+def mk_ioconf(sim_name: str, path_conf: PathConf) -> IOConfig:
+    simdir = path_conf.simdata_prefix
+    datadir = path_conf.intermediate_data
 
     snaps = _CASE_DICT[sim_name]
 
     fnames = [
-        os.path.join(_SIMDIR, sim_name, 'raw', f"{snap}", f"{snap}.h5.0")
+        os.path.join(simdir, sim_name, 'raw', f"{snap}", f"{snap}.h5.0")
         for snap in snaps
     ]
     return IOConfig(
         fnames=fnames,
-        outdir=os.path.join(_DATADIR, sim_name)
+        outdir=os.path.join(datadir, sim_name)
     )
 
 parser = argparse.ArgumentParser(
@@ -57,7 +71,9 @@ parser = argparse.ArgumentParser(
 )
 subparsers = parser.add_subparsers(required=True)
 prof_parser = subparsers.add_parser(
-    "make", help="actually creates the profiles"
+    "make",
+    help="actually creates the profiles",
+    parents=[build_conf_parser()]
 )
 prof_parser.add_argument(
     "--profile-kind",
@@ -67,8 +83,9 @@ prof_parser.add_argument(
 )
 prof_parser.add_argument(
     "--sim",
-    choices=_SIM_CHOICES,
-    nargs='+'
+    nargs='+',
+    required=True,
+    help="specify the names of the simulations to make profiles for"
 )
 prof_parser.add_argument(
     "--parallel_snap", action = 'store', default = None, type = int,

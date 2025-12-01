@@ -2,3 +2,33 @@
 simdata_prefix = "/ix/eschneider/projects/galactic-center/sims/"
 intermediate_data = "/ix/eschneider/projects/galactic-center/intermediate-data/"
 processed_data = "/ix/eschneider/projects/galactic-center/processed-data/"
+
+[sim-props]
+# I don't like this section for a few reasons
+# -> ideally we would be able to infer this information (or at some of it)
+# -> I don't like the idea that we would need to copy between files config
+#    files if we needed to maintain multiple files (e.g. if analysis is done on
+#    different machines)
+
+[sim-props.708cube_GasStaticG-1Einj]
+start_snap = 0
+stop_snap = 1334
+
+[sim-props.708cube_GasStaticG-1Einj_restart-TIcool]
+restart_base = "708cube_GasStaticG-1Einj"
+start_snap = 800
+stop_snap = 1485
+
+[sim-props.708cube_GasStaticG-1Einj_restartDelay-TIcool]
+restart_base = "708cube_GasStaticG-1Einj"
+start_snap = 1300
+stop_snap = 1529
+
+[sim-props.708cube_GasStaticG-2Einj]
+start_snap = 0
+stop_snap = 1082
+
+[sim-props.708cube_GasStaticG-2Einj_restart-TIcool]
+restart_base = "708cube_GasStaticG-2Einj"
+start_snap = 800
+stop_snap = 1598

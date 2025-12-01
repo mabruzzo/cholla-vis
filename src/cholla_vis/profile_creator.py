@@ -332,7 +332,7 @@ def _list_profile_choices() -> tuple[str, ...]:
 
 def show_profile_choices():
     for _, prof_descr in _CHOICES.items():
-        print('"', prof_descr.name, ':"', sep='')
+        print('"', prof_descr.name, '":', sep='')
         print(*textwrap.wrap(
             prof_descr.description,
             width=79,
