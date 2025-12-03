@@ -3,6 +3,7 @@ import numpy as np
 import unyt
 import yt
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import os
 from typing import NamedTuple
@@ -14,6 +15,7 @@ def get_data_names(sim_name, data_name, path_conf: PathConf):
     """
     Get the names of all available intermediate data products
     """
+    assert path_conf is not None
     path = get_intermediate_data_registry(path_conf=path_conf)[sim_name]
     l = []
     with os.scandir(os.path.join(path, data_name)) as it:
@@ -144,7 +146,8 @@ def _gather_fluxes(
     choice = 'net',
     target_level_vals = None,
     alt_field_slc_l = None,
-    T_idx_l = [slice(0,2), 2, 3]
+    T_idx_l = [slice(0,2), 2, 3],
+    path_conf: PathConf | None = None
 ):
     """
     the level field is used to define the isosurface (think of
@@ -154,9 +157,10 @@ def _gather_fluxes(
         The target level values
     """
     if choice == 'net':
-        datasets = get_data_names(sim_name, dataset_kind)
+        datasets = get_data_names(sim_name, dataset_kind, path_conf=path_conf)
     else:
-        datasets = get_data_names(sim_name, dataset_kind + '_positive')
+        datasets = get_data_names(sim_name, dataset_kind + '_positive',
+                                  path_conf=path_conf)
     if snaps is None:
         snaps = sorted(datasets.keys())
 
@@ -424,7 +428,15 @@ def write_data(out_name, net, outflow):
                 f[key].attrs['units'] = flux_units[key]
 
 
-def _collect(kind, choice = 'net', single_conf = True, sim_names = None):
+def _collect(
+    kind: str,
+    choice: str,
+    sim_names: Sequence[str],
+    single_conf = True,
+    path_conf: PathConf | None = None
+):
+    # collects aggregate information
+
     if kind == "z_fluxes":
         kwargs = dict(
             target_level_vals = None,
@@ -454,41 +466,29 @@ def _collect(kind, choice = 'net', single_conf = True, sim_names = None):
 
     yt.set_log_level(40)
 
-    if sim_names is None:
-        sim_names = [
-            '708cube_GasStaticG-1Einj_restart-TIcool',
-            '708cube_GasStaticG-1Einj',
-            '708cube_GasStaticG-2Einj_restart-TIcool',
-            '708cube_GasStaticG-2Einj'
-        ]
-
     out = {}
     
     for sim_name in list(sim_names):
         print()
-        print(sim_name, kind, choice)
+        print(f"sim_name: {sim_name}, kind: {kind}, choice: {choice}")
         out[sim_name] = _gather_fluxes(
             sim_name, snaps = None,
             dataset_kind = kind,
             choice = choice,
             alt_field_slc_l = alt_field_slc_l,
+            path_conf=path_conf,
             **kwargs
         )
         out[sim_name]['label_props'] = label_props
     return out
 
-def _collect_and_save():
-    prefix = '/ihome/eschneider/mwa25/cholla-bugfixing/galactic-center-analysis/'
-    for sim_name in [
-        '708cube_GasStaticG-1Einj_restart-TIcool',
-        '708cube_GasStaticG-1Einj',
-        '708cube_GasStaticG-2Einj_restart-TIcool',
-        '708cube_GasStaticG-2Einj'
-    ]:
+def collect_and_save(sim_names: Sequence[str], path_conf: PathConf):
+    prefix = path_conf.processed_data
+    for sim_name in sim_names:
 
-        _kw = dict(single_conf = False, sim_names = [sim_name])
+        _kw = dict(single_conf = False, sim_names = [sim_name], path_conf=path_conf)
         
-        rflux_datasets_net_cylrad = _collect("r_fluxes", **_kw)
+        rflux_datasets_net_cylrad = _collect("r_fluxes", "net", **_kw)
         rflux_datasets_outflow_cylrad = _collect("r_fluxes", "positive", **_kw)
 
         print('aggregate and save r-fluxes')
@@ -500,7 +500,7 @@ def _collect_and_save():
         del rflux_datasets_net_cylrad
         del rflux_datasets_outflow_cylrad
 
-        zflux_datasets_net_cylrad = _collect("z_fluxes", **_kw)
+        zflux_datasets_net_cylrad = _collect("z_fluxes", "net", **_kw)
         zflux_datasets_outflow_cylrad = _collect("z_fluxes", "positive", **_kw)
         print('aggregate and save z-fluxes')
         write_data(
