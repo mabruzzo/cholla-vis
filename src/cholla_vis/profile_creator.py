@@ -1,18 +1,25 @@
 # we need to unify this with galaxy_profile
 # could also use quite a lot more cleanup
 
-from collections.abc import Callable
+from collections.abc import Sequence, Callable
 from dataclasses import dataclass
-from functools import wraps,partial
+from functools import partial
 import os
 import textwrap
 from time import time
+import typing
 
 import numpy as np
 import unyt
 import yt
+# this is a bit of a hack
+from yt.utilities.logger import ytLogger
 
 from . import galaxy_profile
+from .parallel_spec import ParallelSpec
+
+type YtDataset = typing.Any
+type SavableProduct = typing.Any
 
 _TBIN_EDGES = [
     (0.0, None),
@@ -84,7 +91,6 @@ def _standard_annuli_spec(use_code_length=True):
     return AnnuliSpec(
         nominal_radius = 1.2, length_units = length_units, num_in_nominal_radius = 12
     )
-
 
 def _get_bin_kwargs(ds, use_sph_radial):
     max_z = np.maximum(
@@ -210,64 +216,117 @@ def flux_binned_props(ds, radial, only_positive_vel = False):
         **kwargs
     )
 
-def timing(f):
-    @wraps(f)
-    def wrap(*args, **kw):
-        ts = time()
-        result = f(*args, **kw)
-        te = time()
-        print('func:%r args:[%r, %r] took: %2.4f sec' % \
-          (f.__name__, args, kw, te-ts))
-        return result
-    return wrap
+
+@dataclass
+class IOConfig:
+    snap_seq: Sequence[typing.Any]
+    fname_template: str
+    outdir: str
+
+@dataclass
+class DatasetSeriesInfo:
+    """
+    This tracks information used to determine how we iterate over the datasets
+
+    While this is inspired by `yt.DatasetSeries`, we explicitly avoid using
+    `yt.DatasetSeries` in order let us iterate in parallel over the dataset files
+    and manually decide whether we want to actually load the simulation
+    """
+    snap_seq: Sequence[typing.Any]
+    fname_template: str
+    setup_fn: Callable[[YtDataset], str] | None
 
 
-def create_series(series, callback, fname_func):
+def process_series(
+    series: DatasetSeriesInfo,
+    parallel_spec: ParallelSpec,
+    callback: Callable[[YtDataset], SavableProduct],
+    fname_func: Callable[[str], str] | None = None
+) -> list[str]:
     """
     Generates yt profiles (or anything else)
 
     Parameters
     ----------
-    series: DatasetSeries
+    series
         The series of datasets to load the files from
-    callback: callable
-        Operates 
-    fname_func: callable, optional
+    parallel_spec
+        Describes the parallelism properties
+    callback
+        Performs the actual work. Takes the loaded dataset and the output filename as
+        arguments.
+    fname_func
         A callable that when given a dataset will yield the filename to save 
         the profile to
     """
+    _orig_rank = yt.communication_system.communicators[-1].rank
 
+    setup_fn = series.setup_fn
     my_storage = {}
-    for sto,ds in series.piter(storage = my_storage):
-        print(str(ds))
+    for sto,snap in yt.parallel_objects(series.snap_seq,
+                                        storage = my_storage,
+                                        njobs=parallel_spec.n_work_groups,
+                                        barrier=True,
+                                        dynamic=parallel_spec.dynamic_balance):
+        # the comm communicator only describes the current working group
+        comm = yt.communication_system.communicators[-1]
+        # get the input filename
+        infname = series.fname_template.format(snap = snap)
+
+        # get the output filename
         if fname_func is not None:
-            fname = fname_func(ds)
+            fname = fname_func(infname)
+            _root, _basename = os.path.split(os.path.abspath(fname))
+            # add a prefix rather than a suffix since yt may try to append ".h5"
+            tmpfile = os.path.join(_root, f"tmp-{_basename}")
+            # cleanup the tmpfile if it exists (it means that it was left over)
+            if os.path.isfile(tmpfile):
+                os.remove(tmpfile)
         else:
             fname = None
+            tmpfile = None
 
-        callback(ds, fname)
+        if (fname is None) or os.path.isfile(fname):
+            if comm.rank == 0:
+                ytLogger.info(f"skipping snapshot {snap}")
+            comm.barrier()
+            continue
 
-        #if resume_manager is None:
-        #    create_profile(ds = ds, out_fname = fname)
-        #else:
-        #    resume_manager.process_ds(ds, fname, create_profile)
+
+        if comm.rank == 0:
+            ytLogger.info(f"begin processing snapshot {snap}")
+        comm.barrier()
+
+        start_time = time()
+
+        ds = yt.load(infname)
+        if setup_fn is not None:
+            setup_fn(ds)
+        product = callback(ds)
+        if (fname is not None) and (comm.rank == 0):
+            # we save to tmpfile and then we move it to reduce the risk of a partial
+            # write if the program suddenly aborts
+            product.save_as_dataset(tmpfile)
+            os.rename(src=tmpfile, dst=fname)
+
+        end_time = time()
+        duration = end_time - start_time
+        if comm.rank == 0:
+            ytLogger.info(f"done processing snapshot {snap}, elapsed: {duration}")
+        comm.barrier() 
+
         sto.result = fname
         # the following may be necessary help with memory
         ds.index.clear_all_data()
 
     return [fname for i, fname in sorted(my_storage.items())]
 
-@dataclass
-class IOConfig:
-    fnames: list[str]
-    outdir: str
 
 @dataclass
 class ProfileDescriptor:
     name: str
     description: str
     fn: Callable
-
 
 
 def _mk_profile_descriptors() -> dict[str, ProfileDescriptor]:
@@ -346,7 +405,7 @@ def show_profile_choices():
             sep='\n'
         )
 
-def create_profile(profile_kind, ioconf: IOConfig, parallel:bool =True):
+def create_profile(profile_kind, ioconf: IOConfig, parallel_spec:ParallelSpec):
     """
     Does most of the heavy lifting for creating a profile.
 
@@ -362,33 +421,40 @@ def create_profile(profile_kind, ioconf: IOConfig, parallel:bool =True):
         galaxy_profile.add_flux_fields(ds, radial=False)
 
     # construct the a DatasetSeries
-    print(f"preparing work with parallel = {parallel}")
-    series = yt.DatasetSeries(ioconf.fnames,
-                              parallel = parallel,
-                              setup_function = setup)
+    series = DatasetSeriesInfo(snap_seq=ioconf.snap_seq,
+                               fname_template=ioconf.fname_template,
+                               setup_fn=setup)
     
     # get the callback function that is actually used with a profile
     fn = _CHOICES[profile_kind].fn
 
     dtypename = profile_kind
     dirname = os.path.join(ioconf.outdir, dtypename)
-    def fname_func(ds):
-        s = str(ds)
-        if s.endswith('.h5.0'):
-            basename = s[:-2]
+    def fname_func(full_input_path):
+
+        if full_input_path.endswith('.h5.0'):
+            basename = os.path.basename(full_input_path[:-2])
         else:
-            basename = s
+            basename = os.path.basename(full_input_path)
         return os.path.join(dirname, basename)
 
     os.makedirs(dirname, exist_ok=True)
 
-    @timing
-    def do_work(ds, fname):
+    def do_work(ds):
         prof = fn(ds)
-        prof.save_as_dataset(fname)
         return prof
 
-    fnames = create_series(series, do_work, fname_func)
-    print("function is complete! Created: ")
-    for fname in fnames:
-        print("-> ", fname)
+    fnames = process_series(
+        series=series,
+        parallel_spec=parallel_spec,
+        callback=do_work,
+        fname_func=fname_func
+    )
+
+    comm = yt.communication_system.communicators[-1]
+    if comm.rank == 0:
+        print("function is complete! Created: ")
+        for fname in fnames:
+            print("-> ", fname, flush=True)
+    comm.barrier()
+

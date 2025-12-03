@@ -9,30 +9,53 @@ from cholla_vis.profile_creator import (
 from cholla_vis.conf import (
     PathConf, full_conf_from_cli, build_conf_parser
 )
+from cholla_vis.parallel_spec import (
+    build_parallel_spec_parser, parallel_spec_from_cli,
+    check_and_summarize_parallel_spec
+)
 
 import argparse
+from collections.abc import Sequence
 import os
+import re
 import yt
 
-_STEP = 10
-_CASE_DICT = {
-    '708cube_GasStaticG-1Einj_restart-TIcool' : range(850, 1485, _STEP),
-    '708cube_GasStaticG-1Einj' : range(800, 1334, _STEP),
-    '708cube_GasStaticG-1Einj_restartDelay-TIcool' : range(1300, 1461, _STEP),
-    '708cube_GasStaticG-2Einj_restart-TIcool' : range(1205, 1591, _STEP),
-    '708cube_GasStaticG-2Einj' : range(850, 1081, _STEP),
-}
-
-_SIM_CHOICES = list(_CASE_DICT.keys())
-
+def _integer_sequence(s: str):
+    # This is taken from the scripts in the cholla codebase
+    #
+    # converts an argument string to an integer sequence
+    # -> s can be a range specified as start:stop:step. This follows mirrors
+    #    the semantics of a python slice (at the moment, start and stop are
+    #    both required)
+    # -> s can b a comma separated list
+    # -> s can be a single value
+    m = re.match(r"(?P<start>[-+]?\d+):(?P<stop>[-+]?\d+)(:(?P<step>[-+]?\d+))?", s)
+    if m is not None:
+        rslts = m.groupdict()
+        step = 1
+        if rslts["step"] is not None:
+            step = int(rslts.get("step", 1))
+        if step == 0:
+            raise ValueError(f"The range, {s!r}, has a stepsize of 0")
+        seq = range(int(rslts["start"]), int(rslts["stop"]), step)
+        if len(seq) == 0:
+            raise ValueError(f"The range, {s!r}, has 0 values")
+        return seq
+    elif re.match(r"([-+]?\d+)(,[ ]*[-+]?\d+)+", s):
+        seq = [int(elem) for elem in s.split(",")]
+        return seq
+    try:
+        return [int(s)]
+    except ValueError:
+        raise ValueError(
+            f"{s!r} is invalid. It should be a single int or a range"
+        ) from None
+    
 def main_plot(args):
-    yt.enable_parallelism()
 
-    if args.parallel_snap is None:
-        parallel = True
-    else:
-        assert(args.parallel_snap>=1 and isinstance(args.parallel_snap,int))
-        parallel = args.parallel_snap
+    yt.enable_parallelism()
+    parallel_spec = parallel_spec_from_cli(args)
+    check_and_summarize_parallel_spec(parallel_spec)
 
     assert len(set(args.sim)) == len(args.sim)
 
@@ -40,29 +63,43 @@ def main_plot(args):
     simprop_conf = full_conf.simprop_conf
 
     # perform a sanity-check that all simulations are valid
-    for sim_name in args.sim:
-        if sim_name not in simprop_conf.data:
+    name_snap_pairs = []
+    for sim_arg in args.sim:
+        if "," in sim_arg:
+            sim_name, integer_seq_str = sim_arg.split(",")
+        else:
+            sim_name, integer_seq_str = sim_arg, None
+        sim_props = simprop_conf.data.get(sim_name, None)
+        if sim_props is None:
             raise RuntimeError(
                 f"{sim_name!r} is not a know simulation. Known names include: " +
                 ", ".join(simprop_conf.data.keys())
             )
+        elif integer_seq_str is None:
+            name_snap_pairs.append(
+                (sim_name, range(sim_props.start_snap, sim_props.stop_snap))
+            )
+        else:
+            name_snap_pairs.append((sim_name, _integer_sequence(integer_seq_str)))
 
-    for sim_name in args.sim:
-        ioconf = mk_ioconf(sim_name=sim_name, path_conf=full_conf.path_conf)
-        create_profile(args.profile_kind, ioconf=ioconf, parallel=parallel)
+    comm = yt.communication_system.communicators[-1]
+    for name, snap_seq in name_snap_pairs:
+        if comm.rank == 0:
+            print(f"begin processing: sim = {name!r}, snaps = {snap_seq}", flush=True)
+        comm.barrier()
+        ioconf = mk_ioconf(
+            sim_name=sim_name, path_conf=full_conf.path_conf, snaps=snap_seq
+        )
+        create_profile(args.profile_kind, ioconf=ioconf, parallel_spec=parallel_spec)
 
-def mk_ioconf(sim_name: str, path_conf: PathConf) -> IOConfig:
+def mk_ioconf(sim_name: str, path_conf: PathConf, snaps: Sequence[int]) -> IOConfig:
     simdir = path_conf.simdata_prefix
     datadir = path_conf.intermediate_data
+    fname_template = os.path.join(simdir, sim_name, 'cat', "{snap:d}.h5")
 
-    snaps = _CASE_DICT[sim_name]
-
-    fnames = [
-        os.path.join(simdir, sim_name, 'raw', f"{snap}", f"{snap}.h5.0")
-        for snap in snaps
-    ]
     return IOConfig(
-        fnames=fnames,
+        snap_seq = snaps,
+        fname_template=fname_template,
         outdir=os.path.join(datadir, sim_name)
     )
 
@@ -73,7 +110,7 @@ subparsers = parser.add_subparsers(required=True)
 prof_parser = subparsers.add_parser(
     "make",
     help="actually creates the profiles",
-    parents=[build_conf_parser()]
+    parents=[build_conf_parser(), build_parallel_spec_parser()]
 )
 prof_parser.add_argument(
     "--profile-kind",
@@ -85,17 +122,14 @@ prof_parser.add_argument(
     "--sim",
     nargs='+',
     required=True,
-    help="specify the names of the simulations to make profiles for"
-)
-prof_parser.add_argument(
-    "--parallel_snap", action = 'store', default = None, type = int,
     help=(
-        "the number of snapshots that should be processed in parallel. A "
-        "value of 1 means that only 1 is processed at a time. The remaining "
-        "processors work together to process the data. The total number of "
-        "processors must be evenly divisible by this value."
+        "specify the names of the simulations to make profiles for. You can optionally "
+        "specify a snapshot range by passing '<sim-name>,<snap-range>' instead of "
+        "just <sim-name>. For example, '<sim-name>,850:871:10' would select snapshots "
+        "850, 860, and 870"
     )
 )
+
 prof_parser.set_defaults(func=main_plot)
 
 def main_showkind(args):
@@ -105,7 +139,6 @@ showkind_parser = subparsers.add_parser(
     "show-kind", help="lists and describes the available --profile-kind options"
 )
 showkind_parser.set_defaults(func=main_showkind)
-
 
 if __name__ == '__main__':
     args = parser.parse_args()
