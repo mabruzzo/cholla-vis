@@ -28,3 +28,6 @@ packages = ["src/cholla_vis"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cholla_vis"]
+
+[tool.uv.sources]
+yt = { git = "https://github.com/mabruzzo/yt", branch="cholla-frontend-newformat"}

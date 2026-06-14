@@ -1,15 +1,15 @@
 # defining functionality associated with reading the gravitational potential in as a field
 # and computing fields that store useful derived quantities
 
+import h5py
 import numpy as np
 import unyt
 import yt
 
 from functools import partial
-import os.path
+import os
 
-import h5py
-import deriv
+from . import deriv
 
 def _momentum_cylindrical_phi(field, data):
     mom_x = data['cholla', 'momentum_x']
@@ -30,6 +30,50 @@ def _find_potential_gdepth_activeidx(active_zone_shape, size):
             return gdepth, shape_with_ghosts, active_idx
     raise RuntimeError(
         "There was an issue determining the ghost-depth of the potential")
+
+
+def load_raw_potential_array(
+    path: os.PathLike,
+    active_zone_shape: tuple[int, int, int],
+    *,
+    include_ghosts: bool = True
+) -> tuple[np.ndarray, int]:
+    """
+    Load the raw potential array from specified path, after appropriately
+    reshaping the array
+
+    Returns
+    -------
+    np.ndarray
+        The actual array of data, after reshaping
+    int
+        The inferred gravity ghost depth (this is independent of the value of
+        include_ghosts
+
+    Notes
+    -----
+    This function exists for debugging purposes (i.e. if we don't want to fully
+    use all of yt)
+    """
+
+    with h5py.File(path, 'r') as f:
+        potential_dset = f['potential']
+        assert potential_dset.ndim == 1
+        gdepth, shape_with_ghosts, active_idx = \
+            _find_potential_gdepth_activeidx(active_zone_shape,
+                                             potential_dset.size)
+
+        vals = potential_dset[...] # load the full 1D array
+    # adjust the shape of vals
+    vals.shape = shape_with_ghosts[::-1]
+    vals = np.swapaxes(vals, 0,2)
+
+    if include_ghosts:
+        out = vals
+    else:
+        out = vals[active_idx]
+    return out, gdepth
+
 
 class PotentialFieldLoader:
     """
@@ -93,23 +137,14 @@ class PotentialFieldLoader:
                                'code_specific_energy')    
 
         active_zone_shape = tuple(data.shape)
-        path = self.construct_path(data)
-        with h5py.File(path, 'r') as f:
-            potential_dset = f['potential']
-            gdepth, shape_with_ghosts, active_idx = \
-                _find_potential_gdepth_activeidx(active_zone_shape,
-                                                 potential_dset.size)
-
-            assert potential_dset.ndim == 1
-
-            vals = potential_dset[:] # load the full 1D array
-            # adjust the shape of vals
-            vals.shape = shape_with_ghosts[::-1]
-            vals = np.swapaxes(vals, 0,2)
-            # now clip the ghost-zones
-            out = data.ds.arr(vals[active_idx], 'code_specific_energy')
-            assert out.shape == active_zone_shape
-            return out
+        vals, ghost_depth = load_raw_potential_array(
+            path=self.construct_path(data),
+            active_zone_shape=active_zone_shape,
+            include_ghosts=False
+        )
+        out = data.ds.arr(vals, 'code_specific_energy')
+        assert out.shape == active_zone_shape
+        return out
 
 
 def add_extra_potential_fields(potential_field_func,
